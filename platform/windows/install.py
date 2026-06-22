@@ -169,7 +169,7 @@ def _register_task(task_name: str, script: Path, use_pythonw: bool = False) -> N
 
 def register_tasks() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _register_task(TASK_WATCHER, INSTALLED_WATCHER_PY, use_pythonw=False)
+    _register_task(TASK_WATCHER, INSTALLED_WATCHER_PY, use_pythonw=True)
 
 
 def start_tasks() -> None:

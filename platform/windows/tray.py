@@ -26,16 +26,27 @@ LOG_FILE = Path.home() / ".claude" / "token_alert.log"
 TASK_WATCHER = "TokenAlertWatcher"
 UPDATE_INTERVAL = 10  # 상태 갱신 주기(초)
 ICON_SIZE = (22, 22)
+PID_FILE = Path.home() / ".token_alert.pid"
 
 
 def is_watcher_running() -> bool:
-    """Task Scheduler 쿼리로 watcher 실행 여부 확인."""
+    """watcher 실행 여부 확인. PID 파일 우선, 없으면 schtasks로 재확인."""
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+            os.kill(pid, 0)
+            return True
+        except (OSError, ValueError):
+            pass
+    # PID 파일 없거나 스테일: schtasks로 재확인 (한글/영문 Windows 모두 대응)
     result = subprocess.run(
         ["schtasks", "/query", "/tn", TASK_WATCHER, "/fo", "LIST"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
-    return "Running" in result.stdout
+    return "Running" in result.stdout or "실행 중" in result.stdout
 
 
 def watcher_start() -> None:
