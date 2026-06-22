@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import subprocess
+import winreg
 from pathlib import Path
 
 SCRIPT_ROOT = Path(__file__).parent.parent.parent.resolve()  # token_alert 루트
@@ -141,75 +142,56 @@ def install_watcher_files() -> None:
         print("ℹ️  config.env 없음 — 설치 건너뜀 (환경 변수로 대체 가능)")
 
 
-def _current_user() -> str:
-    domain = os.environ.get("USERDOMAIN", "")
-    username = os.environ.get("USERNAME", "")
-    return f"{domain}\\{username}" if domain and domain != username else username
+_RUN_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
 
 
-def _register_task(task_name: str, script: Path, use_pythonw: bool = False) -> None:
-    """Task Scheduler에 로그인 시 자동 실행 작업을 등록한다."""
-    python_dir = Path(sys.executable).parent
-    pythonw = python_dir / "pythonw.exe"
-    exe = str(pythonw) if (use_pythonw and pythonw.exists()) else sys.executable
-
-    tr = f'"{exe}" "{script}"'
-    result = subprocess.run(
-        [
-            "schtasks", "/create",
-            "/tn", task_name,
-            "/tr", tr,
-            "/sc", "ONLOGON",
-            "/ru", _current_user(),
-            "/rl", "LIMITED",
-            "/f",
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        print(f"❌ Task 등록 실패 ({task_name}):")
-        print(result.stderr.strip())
-        sys.exit(1)
-
-    print(f"✅ Task 등록: {task_name}")
+def _register_startup(name: str, cmd: str) -> None:
+    """HKCU 시작 프로그램 레지스트리에 항목을 등록한다. 관리자 권한 불필요."""
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, cmd)
+    print(f"✅ 시작 프로그램 등록: {name}")
 
 
 def register_tasks() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _register_task(TASK_WATCHER, INSTALLED_WATCHER_PY, use_pythonw=True)
+    python_dir = Path(sys.executable).parent
+    pythonw = python_dir / "pythonw.exe"
+    exe = str(pythonw) if pythonw.exists() else sys.executable
+    _register_startup(TASK_WATCHER, f'"{exe}" "{INSTALLED_WATCHER_PY}"')
+    _register_startup(TASK_TRAY, f'"{TRAY_EXE_DEST}"')
 
 
 def start_tasks() -> None:
-    for task in [TASK_WATCHER, TASK_TRAY]:
-        result = subprocess.run(
-            ["schtasks", "/run", "/tn", task],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            print(f"✅ 즉시 시작: {task}")
-        else:
-            print(f"⚠️  시작 실패 ({task}): {result.stderr.strip()}")
+    python_dir = Path(sys.executable).parent
+    pythonw = python_dir / "pythonw.exe"
+    exe = str(pythonw) if pythonw.exists() else sys.executable
+    _NO_WIN = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+    try:
+        subprocess.Popen([exe, str(INSTALLED_WATCHER_PY)], creationflags=_NO_WIN, close_fds=True)
+        print(f"✅ 즉시 시작: {TASK_WATCHER}")
+    except Exception as e:
+        print(f"⚠️  시작 실패 ({TASK_WATCHER}): {e}")
+    try:
+        subprocess.Popen([str(TRAY_EXE_DEST)], creationflags=subprocess.DETACHED_PROCESS, close_fds=True)
+        print(f"✅ 즉시 시작: {TASK_TRAY}")
+    except Exception as e:
+        print(f"⚠️  시작 실패 ({TASK_TRAY}): {e}")
 
 
 def verify_running() -> None:
     import time
     time.sleep(2)
-    result = subprocess.run(
-        ["schtasks", "/query", "/tn", TASK_WATCHER, "/fo", "LIST"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if "Running" in result.stdout or "실행 중" in result.stdout:
-        print(f"✅ {TASK_WATCHER} 실행 중")
-    else:
-        print(f"⚠️  {TASK_WATCHER} 상태를 확인하세요:")
-        print(f"   schtasks /query /tn {TASK_WATCHER}")
-        print(f"   로그: {STDOUT_LOG}")
+    pid_file = Path.home() / ".token_alert.pid"
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            os.kill(pid, 0)
+            print(f"✅ {TASK_WATCHER} 실행 중 (PID: {pid})")
+            return
+        except (OSError, ValueError):
+            pass
+    print(f"⚠️  {TASK_WATCHER} 상태를 확인하세요:")
+    print(f"   로그: {STDOUT_LOG}")
 
 
 def print_summary(startup_registered: bool = True) -> None:
@@ -224,9 +206,6 @@ def print_summary(startup_registered: bool = True) -> None:
         print(f"  {TRAY_EXE_DEST}\n")
 
     print(f"""📋 유용한 명령어:
-  # 상태 확인
-  schtasks /query /tn {TASK_WATCHER}
-
   # 로그 확인
   type %USERPROFILE%\\.claude\\token_alert.log
 
@@ -284,28 +263,9 @@ def _copy_tray_exe() -> None:
     print(f"✅ TokenAlertTray.exe 복사 완료: {TRAY_EXE_DEST}")
 
 
-def _register_tray_task() -> None:
-    """Task Scheduler에 TokenAlertTray 작업을 등록한다."""
-    subprocess.run(["schtasks", "/delete", "/tn", TASK_TRAY, "/f"], capture_output=True)
-    result = subprocess.run([
-        "schtasks", "/create",
-        "/tn", TASK_TRAY,
-        "/tr", f'"{TRAY_EXE_DEST}"',
-        "/sc", "ONLOGON",
-        "/ru", _current_user(),
-        "/rl", "LIMITED",
-        "/f",
-    ], capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"❌ Task 등록 실패: {result.stderr.strip()}")
-        sys.exit(1)
-    print(f"✅ TokenAlertTray Task 등록 완료")
-
-
 def install_tray_exe() -> None:
-    """exe 복사 + Task 등록 (자동 시작 선택 시 호출)."""
+    """exe 복사 (시작 프로그램 등록은 register_tasks()에서 수행)."""
     _copy_tray_exe()
-    _register_tray_task()
 
 
 def main() -> None:
@@ -327,8 +287,7 @@ def main() -> None:
     banner("시작 프로그램 등록")
     registered = ask_startup()
     if registered:
-        register_tasks()       # TASK_WATCHER 등록
-        _register_tray_task()  # TASK_TRAY 등록
+        register_tasks()   # HKCU Run 레지스트리에 watcher + tray 등록
         start_tasks()
         verify_running()
     else:

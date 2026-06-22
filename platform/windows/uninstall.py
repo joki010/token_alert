@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import subprocess
+import winreg
 from pathlib import Path
 
 SCRIPT_ROOT = Path(__file__).parent.parent.parent.resolve()
@@ -43,27 +44,32 @@ def check_platform() -> None:
         sys.exit(1)
 
 
+_RUN_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+
+
+def _kill_by_pid_file(pid_file: Path) -> None:
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        os.kill(pid, 9)
+        pid_file.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pid_file.unlink(missing_ok=True)
+
+
 def stop_and_delete_task(task_name: str) -> None:
-    # 실행 중이면 먼저 중지
-    subprocess.run(
-        ["schtasks", "/end", "/tn", task_name],
-        capture_output=True,
-    )
-
-    result = subprocess.run(
-        ["schtasks", "/delete", "/tn", task_name, "/f"],
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode == 0:
-        print(f"✅ Task 삭제: {task_name}")
-    elif "ERROR: The system cannot find the file specified" in result.stderr or \
-         "존재하지 않습니다" in result.stderr or \
-         "cannot find" in result.stderr.lower():
-        print(f"ℹ️  Task 없음 (이미 삭제됨): {task_name}")
-    else:
-        print(f"⚠️  Task 삭제 중 경고 ({task_name}): {result.stderr.strip()}")
+    """HKCU 시작 프로그램 레지스트리 항목을 삭제하고 실행 중인 프로세스를 종료한다."""
+    # 실행 중인 watcher 프로세스 종료
+    if task_name == TASK_WATCHER:
+        _kill_by_pid_file(Path.home() / ".token_alert.pid")
+    # 레지스트리 항목 삭제
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, task_name)
+        print(f"✅ 시작 프로그램 삭제: {task_name}")
+    except FileNotFoundError:
+        print(f"ℹ️  시작 프로그램 없음 (이미 삭제됨): {task_name}")
 
 
 def remove_state_file() -> None:
@@ -139,14 +145,14 @@ def main() -> None:
     check_platform()
     banner("token_alert 완전 삭제 (Windows)")
     print(f"\n삭제 대상:")
-    print(f"  • Task Scheduler 작업: {TASK_WATCHER}, {TASK_TRAY}")
+    print(f"  • 시작 프로그램 레지스트리: {TASK_WATCHER}, {TASK_TRAY}")
     print()
 
     if not confirm("계속 진행할까요?"):
         print("취소되었습니다.")
         sys.exit(0)
 
-    banner("Task Scheduler 작업 삭제")
+    banner("시작 프로그램 레지스트리 삭제")
     stop_and_delete_task(TASK_WATCHER)
     stop_and_delete_task(TASK_TRAY)
 
