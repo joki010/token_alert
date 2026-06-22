@@ -7,6 +7,7 @@ token_alert 설치 스크립트 (macOS)
 
 import os
 import shutil
+import stat
 import sys
 import subprocess
 from pathlib import Path
@@ -15,6 +16,12 @@ SCRIPT_DIR = Path(__file__).parent.parent.parent.resolve()  # token_alert 루트
 WATCHER_PY = SCRIPT_DIR / "src" / "watcher.py"
 CONFIG_ENV = SCRIPT_DIR / "config" / "config.env"
 CONFIG_EXAMPLE = SCRIPT_DIR / "config" / "config.env.example"
+
+# 고정 설치 경로
+INSTALL_LIB_DIR = Path.home() / ".local" / "lib" / "token_alert" / "src"
+INSTALLED_WATCHER_PY = INSTALL_LIB_DIR / "watcher.py"
+INSTALLED_CONFIG_DIR = Path.home() / ".config" / "token-alert"
+INSTALLED_CONFIG_ENV = INSTALLED_CONFIG_DIR / "config.env"
 
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_LABEL = "com.token-alert.watcher"
@@ -95,6 +102,22 @@ def check_config() -> None:
     print("✅ config.env 유효성 확인 완료")
 
 
+def install_watcher_files() -> None:
+    """watcher.py와 config.env를 고정 위치에 복사합니다."""
+    INSTALL_LIB_DIR.mkdir(parents=True, exist_ok=True)
+    import shutil as _shutil
+    _shutil.copy2(str(WATCHER_PY), str(INSTALLED_WATCHER_PY))
+    print(f"✅ watcher.py 설치: {INSTALLED_WATCHER_PY}")
+
+    if CONFIG_ENV.exists():
+        INSTALLED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _shutil.copy2(str(CONFIG_ENV), str(INSTALLED_CONFIG_ENV))
+        INSTALLED_CONFIG_ENV.chmod(0o600)
+        print(f"✅ config.env 설치: {INSTALLED_CONFIG_ENV} (권한: 600)")
+    else:
+        print("ℹ️  config.env 없음 — 설치 건너뜀 (환경 변수로 대체 가능)")
+
+
 def create_plist() -> None:
     python3 = sys.executable
 
@@ -109,7 +132,7 @@ def create_plist() -> None:
     <key>ProgramArguments</key>
     <array>
         <string>{python3}</string>
-        <string>{WATCHER_PY}</string>
+        <string>{INSTALLED_WATCHER_PY}</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -306,6 +329,8 @@ def main() -> None:
     check_platform()
     check_python()
     check_config()
+    banner("파일 설치 (고정 경로)")
+    install_watcher_files()
     banner("launchd 데몬 등록")
     create_plist()
     load_daemon()

@@ -35,14 +35,26 @@ LOG_FILE = Path.home() / ".claude" / "token_alert.log"
 
 
 def load_config() -> dict:
-    """config/config.env 또는 환경 변수에서 설정을 읽습니다."""
-    # 스크립트 위치 기준으로 config.env 탐색
-    script_dir = Path(__file__).parent.parent
-    config_path = script_dir / "config" / "config.env"
+    """config/config.env 또는 환경 변수에서 설정을 읽습니다.
+
+    탐색 순서:
+    1. ~/.config/token-alert/config.env (설치된 경우)
+    2. 스크립트 위치 기준 config/config.env (개발 환경, 심볼릭 링크 포함)
+    """
+    candidate_paths = [
+        Path.home() / ".config" / "token-alert" / "config.env",
+        Path(__file__).resolve().parent.parent / "config" / "config.env",
+    ]
+
+    config_path = None
+    for p in candidate_paths:
+        if p.exists():
+            config_path = p
+            break
 
     cfg: dict = {}
 
-    if config_path.exists():
+    if config_path is not None:
         with open(config_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
