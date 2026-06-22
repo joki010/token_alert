@@ -108,10 +108,12 @@ type %USERPROFILE%\.token_alert.pid
 ### Windows 트레이 앱 (`platform/windows/tray.py`)
 
 - `pystray` + `Pillow` 사용
-- watcher 상태 확인: `~/.token_alert.pid` 파일 우선(PID로 `os.kill(pid, 0)`), 스테일 시 `schtasks /query`로 재확인
-- 한글 Windows에서 `schtasks` 출력은 "Running" 대신 "실행 중" — 두 문자열 모두 검사 필요
-- watcher 시작: `schtasks /run /tn TokenAlertWatcher`
-- watcher 중지: `schtasks /end /tn TokenAlertWatcher`
+- watcher 상태 확인: `~/.token_alert.pid` 읽고 `ctypes.windll.kernel32.QueryFullProcessImageNameW(pid)`로 exe 경로에 "python" 포함 여부 확인
+  - `os.kill(pid, 0)` 단독 사용 금지 — PID가 다른 프로세스(예: PowerShell)에 재사용되면 오감지
+  - subprocess로 PowerShell 스폰 금지 — ctypes Windows API 직접 호출이 즉시 반환되고 콘솔 깜빡임 없음
+- watcher 시작: `subprocess.Popen([pythonw, watcher.py], creationflags=CREATE_NO_WINDOW|DETACHED_PROCESS)` — schtasks 미사용
+- watcher 중지: PID 파일 읽어 `os.kill(pid, 9)` 후 PID 파일 삭제 — schtasks 미사용
+- TokenAlertTray.exe가 2개 프로세스로 보이는 것은 pystray/PyInstaller 정상 동작 — 창 없음(HasWindow=False) 확인됨
 - 로그 열기: `os.startfile(log_path)`
 - 상태 갱신 주기: 10초 (백그라운드 스레드)
 - 아이콘: `claudecode-tray.png`(감시 중) / `claudecode-tray-inactive.png`(중지), 알파 `> 30` 이진화 적용
