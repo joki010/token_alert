@@ -72,15 +72,19 @@ python3 platform/macos/install.py
 
 설치 스크립트가 수행하는 작업:
 
-1. **watcher 데몬 등록** — `~/Library/LaunchAgents/com.token-alert.watcher.plist` 생성 및 로드  
-   로그인 시 자동 시작, 크래시 시 자동 재시작 (`KeepAlive: true`)
+1. **고정 경로에 파일 복사** — 프로젝트 폴더 이동·삭제와 무관하게 데몬이 동작하도록 고정 위치에 설치
+   - `~/.local/lib/token_alert/src/watcher.py`
+   - `~/.config/token-alert/config.env` (권한 600)
 
-2. **트레이 앱 빌드** — py2app으로 `dist/TokenAlertTray.app` 생성  
+2. **watcher 데몬 등록** — `~/Library/LaunchAgents/com.token-alert.watcher.plist` 생성 및 로드  
+   고정 경로를 참조. 로그인 시 자동 시작, 크래시 시 자동 재시작 (`KeepAlive: true`)
+
+3. **트레이 앱 빌드** — py2app으로 `dist/TokenAlertTray.app` 생성  
    (최초 실행 시 py2app 자동 설치, 수십 초 소요)
 
-3. **트레이 앱 설치** — `~/Applications/TokenAlertTray.app`으로 복사 및 ad-hoc 서명
+4. **트레이 앱 설치** — `~/Applications/TokenAlertTray.app`으로 복사 및 ad-hoc 서명
 
-4. **트레이 데몬 등록** — `~/Library/LaunchAgents/com.token-alert.tray.plist` 생성 및 로드  
+5. **트레이 데몬 등록** — `~/Library/LaunchAgents/com.token-alert.tray.plist` 생성 및 로드  
    메뉴 막대 아이콘으로 watcher 상태 확인 및 제어 가능
 
 ### 재설치 (설정 변경 후)
@@ -127,6 +131,7 @@ python3 platform/macos/uninstall.py
 3. **파일 삭제** (확인 후 삭제)
    - 상태 파일: `~/.token_alert_state.json`
    - 로그: `~/.claude/token_alert.log`, `~/.claude/token_alert_error.log`
+   - 고정 설치 경로: `~/.local/lib/token_alert/`, `~/.config/token-alert/config.env`
 
 > **보안 주의:** `config/config.env`는 토큰이 담겨 있으므로 직접 삭제하세요.
 > ```bash
@@ -150,7 +155,8 @@ python platform\windows\install.py
 ```
 
 설치 스크립트가 수행하는 작업:
-- Task Scheduler에 `TokenAlertWatcher`, `TokenAlertTray` 등록 (로그인 시 자동 시작)
+- **고정 경로에 파일 복사** — `~\.local\lib\token_alert\src\watcher.py`, `~\.config\token-alert\config.env`
+- Task Scheduler에 `TokenAlertWatcher`, `TokenAlertTray` 등록 (로그인 시 자동 시작, 고정 경로 참조)
 - `TokenAlertTray`는 `pythonw.exe`로 실행 (콘솔 창 없음)
 
 ### 상태 확인
@@ -164,6 +170,22 @@ type %USERPROFILE%\.claude\token_alert.log
 
 ```
 python platform\windows\uninstall.py
+```
+
+---
+
+## 텔레그램 봇 명령
+
+데몬 실행 중 텔레그램에서 봇에게 직접 명령을 보낼 수 있습니다.
+
+| 명령 | 설명 |
+|------|------|
+| `/status` | 다음 토큰 초기화까지 남은 시간 조회 |
+
+예시 응답:
+```
+⏳ 다음 초기화까지 1시간 23분 남았습니다.
+예정 시각: 2026-06-22 21:30 KST
 ```
 
 ---

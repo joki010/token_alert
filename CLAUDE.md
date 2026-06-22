@@ -75,6 +75,7 @@ schtasks /query /tn TokenAlertWatcher
 - 직전 예약 시각과 동일하면 중복 dispatch 방지 (`~/.token_alert_state.json`에 저장)
 - dispatch 직전 진행 중인 이전 워크플로우 실행을 모두 취소 (`cancel_previous_workflow_runs`) — 초기화 시각이 바뀔 때 중복 알림 방지
 - GitHub API `POST /repos/{owner}/{repo}/actions/workflows/token-reset-notify.yml/dispatches` 로 `reset_time` 전달
+- `load_config()`는 `~/.config/token-alert/config.env` → 소스 경로 순으로 탐색 (고정 경로 우선)
 - 단일 인스턴스 보장: 시작 시 `~/.token_alert.pid` 파일 생성, 이미 실행 중이면 즉시 종료 (`acquire_pid_lock`)
 - 종료 시(`atexit`, `SIGTERM`, `SIGINT`) PID 파일 자동 삭제
 
@@ -118,7 +119,8 @@ schtasks /query /tn TokenAlertWatcher
 
 ### macOS 데몬 (`platform/macos/install.py`)
 
-- `~/Library/LaunchAgents/com.token-alert.watcher.plist` 생성 후 `launchctl load`
+- `install.py`가 `watcher.py`를 `~/.local/lib/token_alert/src/watcher.py`로, `config.env`를 `~/.config/token-alert/config.env`로 복사 (고정 경로 배포)
+- `~/Library/LaunchAgents/com.token-alert.watcher.plist` 생성 후 `launchctl load` — plist는 소스 경로 대신 고정 경로를 참조
 - `ProcessType: Background` — 메뉴 바·독 아이콘 없음
 - `KeepAlive: true` — 크래시 시 자동 재시작
 - `StandardOutPath` 미설정 — `watcher.py`의 `FileHandler`가 직접 로그 파일에 씀. stdout 리디렉션과 FileHandler가 겹치면 로그가 2번 기록되므로 의도적으로 제외
@@ -126,7 +128,8 @@ schtasks /query /tn TokenAlertWatcher
 
 ### Windows 데몬 (`platform/windows/install.py`)
 
-- Task Scheduler에 `TokenAlertWatcher`, `TokenAlertTray` 두 작업 등록
+- `install.py`가 `watcher.py`를 `~/.local/lib/token_alert/src/watcher.py`로, `config.env`를 `~/.config/token-alert/config.env`로 복사 (고정 경로 배포)
+- Task Scheduler에 `TokenAlertWatcher`, `TokenAlertTray` 두 작업 등록 (고정 경로 참조)
 - 로그인 시 자동 시작 (`/sc ONLOGON`), 관리자 권한 불필요 (`/rl LIMITED`)
 - tray.py는 `pythonw.exe`(콘솔 창 없음)로 실행
 - 로그: `%USERPROFILE%\.claude\token_alert.log`
