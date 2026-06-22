@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """
-token_alert 설치 스크립트
+token_alert 설치 스크립트 (macOS)
 
-실행: python3 install.py
-
-수행 내용:
-  1. config/config.env 유효성 확인
-  2. macOS launchd plist 생성 (백그라운드 데몬 등록)
-  3. launchctl load 로 즉시 시작
-  4. 설치 확인 안내
+실행: python3 platform/macos/install.py
 """
 
 import os
@@ -16,10 +10,7 @@ import sys
 import subprocess
 from pathlib import Path
 
-# ──────────────────────────────────────────
-# 경로 상수
-# ──────────────────────────────────────────
-SCRIPT_DIR = Path(__file__).parent.resolve()
+SCRIPT_DIR = Path(__file__).parent.parent.parent.resolve()  # token_alert 루트
 WATCHER_PY = SCRIPT_DIR / "src" / "watcher.py"
 CONFIG_ENV = SCRIPT_DIR / "config" / "config.env"
 CONFIG_EXAMPLE = SCRIPT_DIR / "config" / "config.env.example"
@@ -40,15 +31,13 @@ def banner(msg: str) -> None:
 
 
 def check_platform() -> None:
-    """macOS 여부 확인."""
     if sys.platform != "darwin":
         print("❌ 이 설치 스크립트는 macOS 전용입니다.")
-        print("   Windows는 docs/install-guide.md 의 Windows 섹션을 참고하세요.")
+        print("   Windows는 platform/windows/install.py 를 사용하세요.")
         sys.exit(1)
 
 
 def check_python() -> None:
-    """Python 버전 확인."""
     if sys.version_info < (3, 8):
         print(f"❌ Python 3.8 이상이 필요합니다. 현재: {sys.version}")
         sys.exit(1)
@@ -56,7 +45,6 @@ def check_python() -> None:
 
 
 def check_config() -> None:
-    """config.env 존재 및 필수 키 확인."""
     if not CONFIG_ENV.exists():
         print(f"❌ 설정 파일이 없습니다: {CONFIG_ENV}")
         print(f"   아래 명령으로 템플릿을 복사한 뒤 값을 입력하세요:")
@@ -74,7 +62,6 @@ def check_config() -> None:
             k, _, v = line.partition("=")
             cfg[k.strip()] = v.strip()
 
-    missing = []
     placeholder_values = {
         "TELEGRAM_BOT_TOKEN": "1234567890:AA",
         "TELEGRAM_CHAT_ID": "123456789",
@@ -82,6 +69,7 @@ def check_config() -> None:
         "GITHUB_OWNER": "your_github_username",
     }
 
+    missing = []
     for key in required_keys:
         val = cfg.get(key, "")
         if not val:
@@ -93,14 +81,12 @@ def check_config() -> None:
         print("❌ config.env 에 실제 값이 필요한 항목이 있습니다:")
         for m in missing:
             print(m)
-        print("\n  docs/telegram-setup.md, docs/github-setup.md 를 참고하세요.")
         sys.exit(1)
 
     print("✅ config.env 유효성 확인 완료")
 
 
 def create_plist() -> None:
-    """launchd plist 파일을 생성합니다."""
     python3 = sys.executable
 
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -117,11 +103,6 @@ def create_plist() -> None:
         <string>{WATCHER_PY}</string>
     </array>
 
-    <!--
-        RunAtLoad: 로그인 시 자동 시작
-        KeepAlive: 데몬이 죽으면 자동 재시작
-        트레이 아이콘 없음 — 완전히 숨겨진 백그라운드 데몬
-    -->
     <key>RunAtLoad</key>
     <true/>
 
@@ -134,16 +115,9 @@ def create_plist() -> None:
     <key>StandardErrorPath</key>
     <string>{STDERR_LOG}</string>
 
-    <!--
-        ThrottleInterval: 크래시 반복 시 재시작 간격 (초)
-    -->
     <key>ThrottleInterval</key>
     <integer>60</integer>
 
-    <!--
-        ProcessType: Background — macOS 가 백그라운드 프로세스로 분류
-        메뉴 바/독 아이콘 없음
-    -->
     <key>ProcessType</key>
     <string>Background</string>
 </dict>
@@ -158,12 +132,7 @@ def create_plist() -> None:
 
 
 def load_daemon() -> None:
-    """launchctl 로 데몬을 등록하고 시작합니다."""
-    # 이미 로드되어 있으면 먼저 언로드
-    subprocess.run(
-        ["launchctl", "unload", str(PLIST_PATH)],
-        capture_output=True,
-    )
+    subprocess.run(["launchctl", "unload", str(PLIST_PATH)], capture_output=True)
 
     result = subprocess.run(
         ["launchctl", "load", str(PLIST_PATH)],
@@ -180,9 +149,8 @@ def load_daemon() -> None:
 
 
 def verify_running() -> None:
-    """데몬이 실행 중인지 확인합니다."""
     import time
-    time.sleep(2)  # 시작 대기
+    time.sleep(2)
 
     result = subprocess.run(
         ["launchctl", "list", PLIST_LABEL],
@@ -191,9 +159,9 @@ def verify_running() -> None:
     )
 
     if result.returncode == 0:
-        print(f"✅ 데몬 실행 중 (launchctl list 확인)")
+        print(f"✅ 데몬 실행 중")
     else:
-        print("⚠️  데몬 상태를 확인할 수 없습니다. 로그를 확인하세요:")
+        print("⚠️  데몬 상태를 확인할 수 없습니다.")
         print(f"   tail -f {STDOUT_LOG}")
 
 
@@ -203,34 +171,22 @@ def print_summary() -> None:
 token_alert 가 백그라운드에서 실행 중입니다.
 
 📋 유용한 명령어:
-  # 데몬 상태 확인
   launchctl list {PLIST_LABEL}
-
-  # 실시간 로그 확인
   tail -f {STDOUT_LOG}
-
-  # 한 번 테스트 실행
   python3 {WATCHER_PY} --dry-run --once --verbose
-
-  # 완전 삭제
-  python3 {SCRIPT_DIR}/uninstall.py
-
-📖 자세한 내용: {SCRIPT_DIR}/docs/
+  python3 {SCRIPT_DIR}/platform/macos/uninstall.py
 """)
 
 
 def main() -> None:
-    banner("token_alert 설치 시작")
-
+    banner("token_alert 설치 시작 (macOS)")
     check_platform()
     check_python()
     check_config()
-
     banner("launchd 데몬 등록")
     create_plist()
     load_daemon()
     verify_running()
-
     print_summary()
 
 

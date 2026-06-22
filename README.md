@@ -42,9 +42,19 @@ cp config/config.env.example config/config.env
 
 ### 4. 설치
 
+### macOS
+
 ```bash
-python3 install.py
+python3 platform/macos/install.py
 ```
+
+### Windows
+
+```
+python platform\windows\install.py
+```
+
+자세한 내용: [docs/install-windows.md](docs/install-windows.md)
 
 설치가 완료되면 macOS launchd에 백그라운드 데몬이 등록됩니다.  
 트레이 아이콘이나 메뉴 바 표시 없이 완전히 숨겨진 상태로 실행됩니다.
@@ -77,8 +87,16 @@ GITHUB_REPO=token_alert
 
 ## 완전 삭제
 
+### macOS
+
 ```bash
-python3 uninstall.py
+python3 platform/macos/uninstall.py
+```
+
+### Windows
+
+```
+python platform\windows\uninstall.py
 ```
 
 자세한 내용은 [완전 삭제 가이드](docs/uninstall-guide.md)를 참고하세요.
