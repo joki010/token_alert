@@ -46,10 +46,26 @@ python3 uninstall.py
 
 ### GitHub Actions (`.github/workflows/token-reset-notify.yml`)
 
-- `workflow_dispatch` 트리거, input: `reset_time` (ISO 8601 UTC)
+- `workflow_dispatch` 트리거, input: `reset_time` (KST ISO 8601, 예: `2026-06-20T12:00:00+09:00`)
 - `date` 명령으로 현재 시각과 목표 시각 차이 계산 → `sleep $DIFF`
 - 대기 후 `curl`로 Telegram Bot API 호출
 - 최대 실행 시간 360분(6시간) — 5시간 창보다 여유 있음
+- KST 표시 시 `TZ=Asia/Seoul date -d "$TIME"` 필요 (Actions 서버 기본 UTC)
+- `parse_mode: HTML` 사용 — Markdown v1은 언더스코어 이스케이프 오류 발생
+
+### 메뉴 막대 트레이 앱 (`tray.py`)
+
+- `rumps` 라이브러리 사용, venv에 설치됨
+- LaunchAgent: `com.token-alert.tray` (`~/Library/LaunchAgents/com.token-alert.tray.plist`)
+- GUI Python 필수: `/opt/homebrew/Cellar/python@3.13/.../Python.app/.../Python` (rumps가 NSApplication 필요)
+- `PYTHONPATH`를 venv site-packages로 지정해야 rumps import 가능
+- `rumps.App(name, title=..., icon=...)` — 메뉴 막대 표시 텍스트는 `title=` 파라미터, `name`은 내부 식별자
+- 독 아이콘 숨기기: `from AppKit import NSApplication, NSApplicationActivationPolicyAccessory` → `__init__` 최상단에서 `NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)` 호출 (`super().__init__` 전에 해야 함)
+- 활성/비활성 아이콘 전환: `self.icon = str(path)` 로 런타임에 교체 가능
+- 팔레트 PNG(mode=P) → RGBA 변환 후 LANCZOS 리사이즈 시 알파가 1~107로 반투명됨 → 리사이즈 후 `a > 30` 이진화 필요
+- 트레이 재시작: `launchctl unload/load ~/Library/LaunchAgents/com.token-alert.tray.plist`
+- 로그: `~/.claude/token_alert_tray.log`, `~/.claude/token_alert_tray_error.log`
+- 디버깅: `osascript -e 'tell application "System Events" to tell process "Python" to tell menu bar 1 to tell menu bar item 1 to return title'`
 
 ### 설정 (`config/config.env`)
 
@@ -77,4 +93,5 @@ python3 uninstall.py
 - `config/config.env`는 `.gitignore`에 등록됨 — 커밋하지 말 것
 - GitHub Secrets(`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`)는 Actions 워크플로우에서만 사용
 - `--dry-run` 플래그는 `~/.token_alert_state.json`에 상태를 **저장함** — 이후 실제 실행 시 "이미 예약됨"으로 건너뛸 수 있으므로, dry-run 후 실제 dispatch가 필요하면 상태 파일을 삭제할 것 (`rm ~/.token_alert_state.json`)
-- Python 표준 라이브러리만 사용 — 추가 패키지 설치 불필요
+- Python 표준 라이브러리만 사용 — 추가 패키지 설치 불필요 (단, tray.py는 rumps 필요)
+- macOS에 `timeout` 명령 없음 — GNU coreutils 설치 필요하거나 백그라운드 프로세스+kill 방식 사용
