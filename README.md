@@ -155,16 +155,29 @@ python platform\windows\install.py
 ```
 
 설치 스크립트가 수행하는 작업:
-- **고정 경로에 파일 복사** — `~\.local\lib\token_alert\src\watcher.py`, `~\.config\token-alert\config.env`
-- Task Scheduler에 `TokenAlertWatcher`, `TokenAlertTray` 등록 (로그인 시 자동 시작, 고정 경로 참조)
-- `TokenAlertTray`는 `pythonw.exe`로 실행 (콘솔 창 없음)
+
+1. **고정 경로에 파일 복사** — `~\.local\lib\token_alert\src\watcher.py`, `~\.config\token-alert\config.env`
+2. **TokenAlertTray.exe 빌드** — PyInstaller로 단일 실행 파일 생성 (`%LOCALAPPDATA%\TokenAlert\`)
+3. **시작 프로그램 등록 여부 선택** — `y` 선택 시 `HKCU\SOFTWARE\...\Run` 레지스트리에 등록 (관리자 권한 불필요)
+4. **즉시 시작** — watcher(`pythonw.exe`, 콘솔 창 없음) + 트레이 앱 백그라운드 실행
 
 ### 상태 확인
 
 ```
-schtasks /query /tn TokenAlertWatcher
+# watcher 실행 중 여부 (PID 파일 확인)
+type %USERPROFILE%\.token_alert.pid
+
+# 로그 확인
 type %USERPROFILE%\.claude\token_alert.log
 ```
+
+### 트레이 앱 메뉴
+
+시스템 트레이 아이콘을 클릭하면:
+- **● 감시 중 / ○ 감시 중지됨** — watcher 현재 상태
+- **감시 중지 / 감시 재시작** — watcher 토글 (레지스트리 방식, 관리자 권한 불필요)
+- **로그 열기** — 로그 파일 열기
+- **종료** — 트레이 앱 종료 (watcher는 계속 실행)
 
 ### 언인스톨
 
