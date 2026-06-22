@@ -12,14 +12,21 @@ from pathlib import Path
 import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
 
-SCRIPT_ROOT = Path(__file__).parent.parent.parent.resolve()  # token_alert 루트
+# py2app 번들 여부에 따라 리소스 경로 결정
+if getattr(sys, "frozen", False):
+    RESOURCES = Path(os.environ.get("RESOURCEPATH", Path(__file__).parent))
+else:
+    RESOURCES = Path(__file__).parent.parent.parent.resolve()
+
+SCRIPT_ROOT = Path(__file__).parent.parent.parent.resolve()
 TRAY_LOCK = Path("/tmp/token_alert_tray.pid")
 LABEL = "com.token-alert.watcher"
 PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
-ICON = SCRIPT_ROOT / "claudecode-tray.png"
-ICON_INACTIVE = SCRIPT_ROOT / "claudecode-tray-inactive.png"
+ICON = RESOURCES / "claudecode-tray.png"
+ICON_INACTIVE = RESOURCES / "claudecode-tray-inactive.png"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
 
+AUTOSAVE_NAME = "TokenAlert"
 UPDATE_INTERVAL = 10
 
 
@@ -44,7 +51,7 @@ class TokenAlertApp(rumps.App):
         NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
         icon = str(ICON) if ICON.exists() else None
-        super().__init__("token_alert", title="", icon=icon, quit_button=None)
+        super().__init__("token_alert", title=None, icon=icon, quit_button=None)
 
         self.status_item = rumps.MenuItem("확인 중...")
         self.status_item.set_callback(None)
@@ -59,6 +66,18 @@ class TokenAlertApp(rumps.App):
             rumps.MenuItem("종료", callback=self.quit_app),
         ]
         self._refresh_status()
+
+    def _set_autosave_name(self):
+        """앱 시작 후 NSStatusItem autosaveName 설정 — macOS Tahoe에서 메뉴바 표시에 필요."""
+        try:
+            self._nsapp.nsstatusitem.setAutosaveName_(AUTOSAVE_NAME)
+        except AttributeError:
+            pass
+
+    @rumps.timer(0.1)
+    def _init_autosave(self, sender):
+        sender.stop()
+        self._set_autosave_name()
 
     def _refresh_status(self):
         running = is_watcher_running()

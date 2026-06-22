@@ -5,6 +5,7 @@ token_alert 완전 삭제 스크립트 (macOS)
 실행: python3 platform/macos/uninstall.py
 """
 
+import shutil
 import sys
 import subprocess
 from pathlib import Path
@@ -16,6 +17,12 @@ STATE_FILE = Path.home() / ".token_alert_state.json"
 STDOUT_LOG = Path.home() / ".claude" / "token_alert.log"
 STDERR_LOG = Path.home() / ".claude" / "token_alert_error.log"
 CONFIG_ENV = SCRIPT_DIR / "config" / "config.env"
+
+TRAY_PLIST_LABEL = "com.token-alert.tray"
+TRAY_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{TRAY_PLIST_LABEL}.plist"
+TRAY_APP_DEST = Path.home() / "Applications" / "TokenAlertTray.app"
+TRAY_STDOUT_LOG = Path.home() / ".claude" / "token_alert_tray.log"
+TRAY_STDERR_LOG = Path.home() / ".claude" / "token_alert_tray_error.log"
 
 
 def banner(msg: str) -> None:
@@ -87,6 +94,46 @@ def remove_logs() -> None:
         print("↩️  로그 파일 보존")
 
 
+def stop_tray() -> None:
+    result = subprocess.run(
+        ["launchctl", "list", TRAY_PLIST_LABEL],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print("ℹ️  트레이가 실행 중이 아닙니다")
+        return
+
+    subprocess.run(["launchctl", "unload", str(TRAY_PLIST_PATH)], capture_output=True)
+    print("✅ 트레이 중지 완료")
+
+
+def remove_tray_plist() -> None:
+    if TRAY_PLIST_PATH.exists():
+        TRAY_PLIST_PATH.unlink()
+        print(f"✅ 트레이 plist 삭제: {TRAY_PLIST_PATH}")
+    else:
+        print(f"ℹ️  트레이 plist 없음: {TRAY_PLIST_PATH}")
+
+
+def remove_tray_app() -> None:
+    if TRAY_APP_DEST.exists():
+        shutil.rmtree(TRAY_APP_DEST)
+        print(f"✅ 트레이 앱 삭제: {TRAY_APP_DEST}")
+    else:
+        print(f"ℹ️  트레이 앱 없음: {TRAY_APP_DEST}")
+
+    # controlcenter 표시 설정 초기화
+    subprocess.run([
+        "defaults", "delete", "com.apple.controlcenter", "NSStatusItem Visible TokenAlert",
+    ], capture_output=True)
+
+    # 트레이 로그
+    for log in [TRAY_STDOUT_LOG, TRAY_STDERR_LOG]:
+        if log.exists():
+            log.unlink()
+            print(f"✅ 트레이 로그 삭제: {log}")
+
+
 def remind_config() -> None:
     if CONFIG_ENV.exists():
         print(f"""
@@ -104,6 +151,11 @@ def main() -> None:
 
     banner("데몬 중지")
     stop_daemon()
+
+    banner("트레이 앱 중지 및 제거")
+    stop_tray()
+    remove_tray_plist()
+    remove_tray_app()
 
     banner("파일 삭제")
     remove_plist()

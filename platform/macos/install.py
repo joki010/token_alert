@@ -6,6 +6,7 @@ token_alert 설치 스크립트 (macOS)
 """
 
 import os
+import shutil
 import sys
 import subprocess
 from pathlib import Path
@@ -19,9 +20,17 @@ LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_LABEL = "com.token-alert.watcher"
 PLIST_PATH = LAUNCH_AGENTS_DIR / f"{PLIST_LABEL}.plist"
 
+TRAY_PLIST_LABEL = "com.token-alert.tray"
+TRAY_PLIST_PATH = LAUNCH_AGENTS_DIR / f"{TRAY_PLIST_LABEL}.plist"
+TRAY_APP_DEST = Path.home() / "Applications" / "TokenAlertTray.app"
+TRAY_BINARY = TRAY_APP_DEST / "Contents" / "MacOS" / "TokenAlertTray"
+TRAY_AUTOSAVE_NAME = "TokenAlert"
+
 LOG_DIR = Path.home() / ".claude"
 STDOUT_LOG = LOG_DIR / "token_alert.log"
 STDERR_LOG = LOG_DIR / "token_alert_error.log"
+TRAY_STDOUT_LOG = LOG_DIR / "token_alert_tray.log"
+TRAY_STDERR_LOG = LOG_DIR / "token_alert_tray_error.log"
 
 
 def banner(msg: str) -> None:
@@ -162,6 +171,122 @@ def verify_running() -> None:
         print(f"   tail -f {STDOUT_LOG}")
 
 
+def ensure_py2app() -> None:
+    """py2app이 venv에 없으면 설치."""
+    venv_python = SCRIPT_DIR / ".venv" / "bin" / "python"
+    if not venv_python.exists():
+        print("❌ .venv 가 없습니다. 먼저 python3 -m venv .venv 를 실행하세요.")
+        sys.exit(1)
+
+    result = subprocess.run(
+        [str(venv_python), "-c", "import py2app"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        print("⏳ py2app 설치 중...")
+        subprocess.run(
+            [str(venv_python), "-m", "pip", "install", "py2app"],
+            check=True,
+        )
+    print("✅ py2app 준비 완료")
+
+
+def build_tray_app() -> None:
+    """py2app으로 TokenAlertTray.app 빌드."""
+    venv_python = SCRIPT_DIR / ".venv" / "bin" / "python"
+    setup_py = SCRIPT_DIR / "platform" / "macos" / "setup_tray.py"
+    dist_app = SCRIPT_DIR / "dist" / "TokenAlertTray.app"
+
+    print("⏳ TokenAlertTray.app 빌드 중 (수십 초 소요)...")
+    result = subprocess.run(
+        [str(venv_python), str(setup_py), "py2app"],
+        cwd=str(SCRIPT_DIR),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print("❌ py2app 빌드 실패:")
+        print(result.stderr[-2000:])
+        sys.exit(1)
+
+    if not dist_app.exists():
+        print(f"❌ 빌드 결과물을 찾을 수 없습니다: {dist_app}")
+        sys.exit(1)
+
+    print(f"✅ 빌드 완료: {dist_app}")
+
+
+def install_tray_app() -> None:
+    """빌드된 .app을 ~/Applications으로 이동, 트레이 LaunchAgent 등록."""
+    dist_app = SCRIPT_DIR / "dist" / "TokenAlertTray.app"
+
+    # 기존 트레이 중지
+    subprocess.run(["launchctl", "unload", str(TRAY_PLIST_PATH)], capture_output=True)
+
+    # ~/Applications 생성 및 .app 복사
+    TRAY_APP_DEST.parent.mkdir(parents=True, exist_ok=True)
+    if TRAY_APP_DEST.exists():
+        shutil.rmtree(TRAY_APP_DEST)
+    shutil.copytree(str(dist_app), str(TRAY_APP_DEST))
+
+    # ad-hoc 서명 (Gatekeeper 없이 로컬 실행 가능하도록)
+    subprocess.run(
+        ["codesign", "--force", "--deep", "--sign", "-", str(TRAY_APP_DEST)],
+        capture_output=True,
+    )
+
+    # macOS Tahoe: controlcenter에 NSStatusItem 표시 등록
+    subprocess.run([
+        "defaults", "write", "com.apple.controlcenter",
+        f"NSStatusItem Visible {TRAY_AUTOSAVE_NAME}", "-bool", "true",
+    ], check=True)
+
+    # 트레이 LaunchAgent plist 생성
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{TRAY_PLIST_LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{TRAY_BINARY}</string>
+    </array>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>{TRAY_STDOUT_LOG}</string>
+
+    <key>StandardErrorPath</key>
+    <string>{TRAY_STDERR_LOG}</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+"""
+    TRAY_PLIST_PATH.write_text(plist_content, encoding="utf-8")
+
+    result = subprocess.run(
+        ["launchctl", "load", str(TRAY_PLIST_PATH)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"❌ 트레이 LaunchAgent 로드 실패: {result.stderr}")
+        sys.exit(1)
+
+    print(f"✅ TokenAlertTray.app 설치 완료: {TRAY_APP_DEST}")
+    print("✅ 트레이 LaunchAgent 등록 완료")
+
+
 def print_summary() -> None:
     banner("설치 완료!")
     print(f"""
@@ -169,6 +294,7 @@ token_alert 가 백그라운드에서 실행 중입니다.
 
 📋 유용한 명령어:
   launchctl list {PLIST_LABEL}
+  launchctl list {TRAY_PLIST_LABEL}
   tail -f {STDOUT_LOG}
   python3 {WATCHER_PY} --dry-run --once --verbose
   python3 {SCRIPT_DIR}/platform/macos/uninstall.py
@@ -184,6 +310,10 @@ def main() -> None:
     create_plist()
     load_daemon()
     verify_running()
+    banner("트레이 앱 빌드 및 설치")
+    ensure_py2app()
+    build_tray_app()
+    install_tray_app()
     print_summary()
 
 

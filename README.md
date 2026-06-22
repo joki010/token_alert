@@ -1,105 +1,172 @@
 # token_alert
 
-Claude Code의 5시간 토큰 사용량 초기화 시각을 자동으로 계산하여, 컴퓨터가 꺼져 있어도 텔레그램으로 알림을 보내주는 도구입니다.
+Claude Code의 5시간 토큰 초기화 시각을 자동으로 계산하여 컴퓨터가 꺼져 있어도 텔레그램으로 알림을 보내주는 도구.
 
 ## 작동 원리
 
 ```
-로컬 감지 데몬 (launchd)
-    ↓ ~/.claude/projects/**/JSONL 파일 모니터링 (10분마다)
-    ↓ 5시간 창에서 가장 오래된 메시지 시각 + 5시간 = 초기화 예정 시각 계산
-    ↓ GitHub Actions 워크플로우 dispatch (초기화 시각 전달)
+로컬 감지 데몬 (launchd / Task Scheduler)
+  ↓  ~/.claude/projects/**/JSONL 파일 모니터링 (10분마다)
+  ↓  5시간 창에서 가장 오래된 메시지 + 5h = 초기화 예정 시각 계산
+  ↓  GitHub Actions workflow_dispatch 호출 (reset_time 전달)
 
 GitHub Actions (클라우드)
-    ↓ 초기화 시각까지 sleep
-    ↓ Telegram Bot API 호출
+  ↓  초기화 시각까지 sleep
+  ↓  Telegram Bot API 호출
 
-텔레그램
-    → 사용자에게 알림 도착 (컴퓨터 꺼져도 OK)
+텔레그램 → 알림 도착
 ```
 
-## 빠른 시작
+---
 
-### 1. 필수 준비
+## 준비사항
 
-- 텔레그램 계정 + 봇 토큰 ([텔레그램 봇 설정 가이드](docs/telegram-setup.md))
-- GitHub 계정 + Personal Access Token ([GitHub 설정 가이드](docs/github-setup.md))
 - Python 3.8+
+- GitHub 계정 + Personal Access Token (scope: `workflow`)
+- 텔레그램 봇 토큰 + chat_id
+- 이 저장소를 본인 GitHub 계정에 포크 또는 클론
 
-### 2. 이 저장소를 GitHub에 포크 또는 클론
+설정 방법:
+- [텔레그램 봇 설정](docs/telegram-setup.md)
+- [GitHub Actions 설정](docs/github-setup.md)
 
-```bash
-git clone https://github.com/YOUR_USERNAME/token_alert.git
-cd token_alert
-```
+---
 
-### 3. 설정 파일 작성
+## 설정 파일
 
 ```bash
 cp config/config.env.example config/config.env
-# config/config.env 파일을 편집하여 토큰 입력
+# config/config.env 편집
 ```
 
-### 4. 설치
+| 키 | 설명 |
+|----|------|
+| `TELEGRAM_BOT_TOKEN` | BotFather 발급 토큰 |
+| `TELEGRAM_CHAT_ID` | 수신자 chat_id |
+| `GITHUB_TOKEN` | PAT (scope: workflow) |
+| `GITHUB_OWNER` | GitHub 사용자명 |
+| `GITHUB_REPO` | 저장소 이름 (기본: `token_alert`) |
+| `POLL_INTERVAL` | 감지 주기 초 (기본: 600) |
+| `NOTIFY_ADVANCE_SECONDS` | 초기화 시각 몇 초 전에 알림 (기본: 0) |
 
-### macOS
+---
+
+## macOS 설치
+
+### 필수 조건
+
+- macOS 12 이상
+- Python 3.8+
+- venv 생성 및 rumps 설치
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install rumps pyobjc-framework-Cocoa
+```
+
+### 설치
 
 ```bash
 python3 platform/macos/install.py
 ```
 
-### Windows
+설치 스크립트가 수행하는 작업:
 
-```
-python platform\windows\install.py
-```
+1. **watcher 데몬 등록** — `~/Library/LaunchAgents/com.token-alert.watcher.plist` 생성 및 로드  
+   로그인 시 자동 시작, 크래시 시 자동 재시작 (`KeepAlive: true`)
 
-자세한 내용: [docs/install-windows.md](docs/install-windows.md)
+2. **트레이 앱 빌드** — py2app으로 `dist/TokenAlertTray.app` 생성  
+   (최초 실행 시 py2app 자동 설치, 수십 초 소요)
 
-설치가 완료되면 macOS launchd에 백그라운드 데몬이 등록됩니다.  
-트레이 아이콘이나 메뉴 바 표시 없이 완전히 숨겨진 상태로 실행됩니다.
+3. **트레이 앱 설치** — `~/Applications/TokenAlertTray.app`으로 복사 및 ad-hoc 서명
 
-## 설정 파일
+4. **트레이 데몬 등록** — `~/Library/LaunchAgents/com.token-alert.tray.plist` 생성 및 로드  
+   메뉴 막대 아이콘으로 watcher 상태 확인 및 제어 가능
 
-`config/config.env` 파일을 작성합니다:
+### 재설치 (설정 변경 후)
 
-```env
-# 텔레그램 봇 토큰 (BotFather에서 발급)
-TELEGRAM_BOT_TOKEN=1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# 텔레그램 채팅 ID (본인 chat_id)
-TELEGRAM_CHAT_ID=123456789
-
-# GitHub Personal Access Token (workflow 실행 권한 필요)
-GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# GitHub 저장소 (포크한 저장소)
-GITHUB_OWNER=your_github_username
-GITHUB_REPO=token_alert
+```bash
+python3 platform/macos/uninstall.py
+python3 platform/macos/install.py
 ```
 
-## 문서
+### 상태 확인
 
-- [텔레그램 봇 설정 가이드](docs/telegram-setup.md)
-- [GitHub Actions 설정 가이드](docs/github-setup.md)
-- [설치 가이드](docs/install-guide.md)
-- [완전 삭제 가이드](docs/uninstall-guide.md)
+```bash
+# 데몬 상태
+launchctl list com.token-alert.watcher
+launchctl list com.token-alert.tray
 
-## 완전 삭제
+# 실시간 로그
+tail -f ~/.claude/token_alert.log
 
-### macOS
+# 한 번 테스트 실행 (실제 dispatch 없이)
+python3 src/watcher.py --dry-run --once --verbose
+```
+
+### 트레이 앱 메뉴
+
+메뉴 막대 아이콘을 클릭하면:
+- **● 감시 중 / ○ 감시 중지됨** — watcher 현재 상태
+- **감시 중지 / 감시 재시작** — watcher 토글
+- **로그 열기** — Console.app으로 로그 확인
+- **종료** — 트레이 앱 종료 (watcher는 계속 실행)
+
+---
+
+## macOS 언인스톨
 
 ```bash
 python3 platform/macos/uninstall.py
 ```
 
-### Windows
+언인스톨 스크립트가 수행하는 작업:
+
+1. **watcher 데몬 중지** — launchctl unload → plist 삭제
+2. **트레이 앱 중지** — launchctl unload → plist 삭제 → `~/Applications/TokenAlertTray.app` 삭제
+3. **파일 삭제** (확인 후 삭제)
+   - 상태 파일: `~/.token_alert_state.json`
+   - 로그: `~/.claude/token_alert.log`, `~/.claude/token_alert_error.log`
+
+> **보안 주의:** `config/config.env`는 토큰이 담겨 있으므로 직접 삭제하세요.
+> ```bash
+> rm config/config.env
+> ```
+
+---
+
+## Windows 설치
+
+### 필수 조건
+
+```
+pip install pystray Pillow
+```
+
+### 설치
+
+```
+python platform\windows\install.py
+```
+
+설치 스크립트가 수행하는 작업:
+- Task Scheduler에 `TokenAlertWatcher`, `TokenAlertTray` 등록 (로그인 시 자동 시작)
+- `TokenAlertTray`는 `pythonw.exe`로 실행 (콘솔 창 없음)
+
+### 상태 확인
+
+```
+schtasks /query /tn TokenAlertWatcher
+type %USERPROFILE%\.claude\token_alert.log
+```
+
+### 언인스톨
 
 ```
 python platform\windows\uninstall.py
 ```
 
-자세한 내용은 [완전 삭제 가이드](docs/uninstall-guide.md)를 참고하세요.
+---
 
 ## 테스트
 
@@ -107,9 +174,9 @@ python platform\windows\uninstall.py
 python3 -m pytest tests/test_watcher.py -v
 ```
 
-## 요구사항
+---
 
-- macOS 12+
-- Python 3.8+
-- GitHub 계정 (무료)
-- 텔레그램 계정 (무료)
+## 문서
+
+- [텔레그램 봇 설정](docs/telegram-setup.md)
+- [GitHub Actions 설정](docs/github-setup.md)
