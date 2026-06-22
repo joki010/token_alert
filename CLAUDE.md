@@ -98,6 +98,11 @@ schtasks /query /tn TokenAlertWatcher
 - 팔레트 PNG(mode=P) → RGBA 변환 후 LANCZOS 리사이즈 시 알파가 1~107로 반투명됨 → 리사이즈 후 `a > 30` 이진화 필요
 - 트레이 재시작: `launchctl unload/load ~/Library/LaunchAgents/com.token-alert.tray.plist`
 - 디버깅: `osascript -e 'tell application "System Events" to tell process "Python" to tell menu bar 1 to tell menu bar item 1 to return title'`
+- **macOS Tahoe(26+) 필수**: `autosaveName` 없는 `NSStatusItem`은 기본값 숨김 → `setAutosaveName_("TokenAlert")`을 `@rumps.timer(0.1)`로 run loop 시작 후 설정 (`_nsapp.nsstatusitem`은 `app.run()` 이후에만 접근 가능)
+- 설치 시 `defaults write com.apple.controlcenter "NSStatusItem Visible TokenAlert" -bool true` 필수 — 미실행 시 아이콘이 맥 메뉴바에 나타나지 않음
+- py2app으로 번들링: `platform/macos/setup_tray.py` 설정 파일, 출력은 `dist/TokenAlertTray.app`; `CFBundleName`이 바이너리 이름 결정
+- 번들 후 애드혹 서명 필요: `codesign --force --deep --sign - ~/Applications/TokenAlertTray.app`
+- LaunchAgent plist에 `LimitLoadToSessionType = Aqua` 필요 — GUI/메뉴바 앱은 Aqua 세션에서만 동작
 
 ### Windows 트레이 앱 (`platform/windows/tray.py`)
 
@@ -108,6 +113,8 @@ schtasks /query /tn TokenAlertWatcher
 - 로그 열기: `os.startfile(log_path)`
 - 상태 갱신 주기: 10초 (백그라운드 스레드)
 - 아이콘: `claudecode-tray.png`(감시 중) / `claudecode-tray-inactive.png`(중지), 알파 `> 30` 이진화 적용
+- PyInstaller 빌드 스펙: `platform/windows/setup_tray.spec` (6.x 문법) — `a.zipped_data`, `a.zipfiles`, `cipher` 파라미터는 PyInstaller 6.x에서 제거됨
+- 빌드 산출물 설치 위치: `%LOCALAPPDATA%\TokenAlert\TokenAlertTray.exe`; `hiddenimports=['pystray._win32']` 필수
 
 ### macOS 데몬 (`platform/macos/install.py`)
 

@@ -16,5 +16,8 @@ venv/
 # macOS
 .DS_Store
 
+# Windows 빌드 산출물
+claudecode-tray.ico
+
 # 워크플로우 추적 파일 (로컬 전용)
 .fablize/

@@ -5,6 +5,8 @@ token_alert 설치 스크립트 (Windows)
 실행: python platform/windows/install.py
 """
 
+import os
+import shutil
 import sys
 import subprocess
 from pathlib import Path
@@ -20,6 +22,9 @@ STDERR_LOG = LOG_DIR / "token_alert_error.log"
 
 TASK_WATCHER = "TokenAlertWatcher"
 TASK_TRAY = "TokenAlertTray"
+
+INSTALL_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "TokenAlert"
+TRAY_EXE_DEST = INSTALL_DIR / "TokenAlertTray.exe"
 
 
 def banner(msg: str) -> None:
@@ -137,7 +142,6 @@ def _register_task(task_name: str, script: Path, use_pythonw: bool = False) -> N
 def register_tasks() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     _register_task(TASK_WATCHER, WATCHER_PY, use_pythonw=False)
-    _register_task(TASK_TRAY, TRAY_PY, use_pythonw=True)
 
 
 def start_tasks() -> None:
@@ -189,12 +193,78 @@ token_alert 가 백그라운드에서 실행 중입니다.
 """)
 
 
+def convert_icon_to_ico() -> None:
+    from PIL import Image
+    src = SCRIPT_ROOT / "claudecode-tray.png"
+    dst = SCRIPT_ROOT / "claudecode-tray.ico"
+    if not dst.exists():
+        img = Image.open(src).resize((256, 256), Image.LANCZOS)
+        img.save(str(dst), format="ICO")
+    print("✅ ICO 변환 완료")
+
+
+def ensure_pyinstaller() -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", "import PyInstaller"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"], check=True)
+    print("✅ PyInstaller 준비 완료")
+
+
+def build_tray_exe() -> None:
+    spec = SCRIPT_ROOT / "platform" / "windows" / "setup_tray.spec"
+    dist_exe = SCRIPT_ROOT / "dist" / "TokenAlertTray.exe"
+
+    print("⏳ TokenAlertTray.exe 빌드 중...")
+    result = subprocess.run(
+        [sys.executable, "-m", "PyInstaller", "--distpath", str(SCRIPT_ROOT / "dist"),
+         "--workpath", str(SCRIPT_ROOT / "build"), str(spec)],
+        cwd=str(SCRIPT_ROOT),
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print("❌ PyInstaller 빌드 실패:")
+        print(result.stderr[-2000:])
+        sys.exit(1)
+    print(f"✅ 빌드 완료: {dist_exe}")
+
+
+def install_tray_exe() -> None:
+    dist_exe = SCRIPT_ROOT / "dist" / "TokenAlertTray.exe"
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(dist_exe), str(TRAY_EXE_DEST))
+
+    # 기존 Task 삭제 후 재등록
+    subprocess.run(["schtasks", "/delete", "/tn", TASK_TRAY, "/f"], capture_output=True)
+    result = subprocess.run([
+        "schtasks", "/create",
+        "/tn", TASK_TRAY,
+        "/tr", f'"{TRAY_EXE_DEST}"',
+        "/sc", "ONLOGON",
+        "/rl", "LIMITED",
+        "/f",
+    ], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"❌ Task 등록 실패: {result.stderr.strip()}")
+        sys.exit(1)
+    print(f"✅ TokenAlertTray.exe 설치 완료: {TRAY_EXE_DEST}")
+
+
 def main() -> None:
     banner("token_alert 설치 시작 (Windows)")
     check_platform()
     check_python()
     check_pystray()
     check_config()
+    
+    banner("트레이 앱 빌드 및 설치")
+    ensure_pyinstaller()
+    convert_icon_to_ico()
+    build_tray_exe()
+    install_tray_exe()
+    
     banner("Task Scheduler 등록")
     register_tasks()
     start_tasks()

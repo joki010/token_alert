@@ -14,9 +14,13 @@ from pathlib import Path
 import pystray
 from PIL import Image
 
-SCRIPT_ROOT = Path(__file__).parent.parent.parent.resolve()  # token_alert 루트
-ICON_PATH = SCRIPT_ROOT / "claudecode-tray.png"
-ICON_INACTIVE_PATH = SCRIPT_ROOT / "claudecode-tray-inactive.png"
+if getattr(sys, 'frozen', False):
+    RESOURCES = Path(sys._MEIPASS)
+else:
+    RESOURCES = Path(__file__).parent.parent.parent.resolve()
+
+ICON_PATH = RESOURCES / "claudecode-tray.png"
+ICON_INACTIVE_PATH = RESOURCES / "claudecode-tray-inactive.png"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
 
 TASK_WATCHER = "TokenAlertWatcher"

@@ -5,6 +5,8 @@ token_alert 완전 삭제 스크립트 (Windows)
 실행: python platform\\windows\\uninstall.py
 """
 
+import os
+import shutil
 import sys
 import subprocess
 from pathlib import Path
@@ -17,6 +19,7 @@ STDERR_LOG = Path.home() / ".claude" / "token_alert_error.log"
 
 TASK_WATCHER = "TokenAlertWatcher"
 TASK_TRAY = "TokenAlertTray"
+INSTALL_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "TokenAlert"
 
 
 def banner(msg: str) -> None:
@@ -86,6 +89,14 @@ def remove_logs() -> None:
         print("↩️  로그 파일 보존")
 
 
+def remove_tray_exe() -> None:
+    if INSTALL_DIR.exists():
+        shutil.rmtree(INSTALL_DIR)
+        print(f"✅ 트레이 앱 삭제: {INSTALL_DIR}")
+    else:
+        print(f"ℹ️  트레이 앱 없음: {INSTALL_DIR}")
+
+
 def remind_config() -> None:
     if CONFIG_ENV.exists():
         print(f"""
@@ -113,6 +124,7 @@ def main() -> None:
     banner("파일 삭제")
     remove_state_file()
     remove_logs()
+    remove_tray_exe()
 
     remind_config()
     banner("삭제 완료!")
