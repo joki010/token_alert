@@ -28,6 +28,7 @@ from pathlib import Path
 WINDOW_HOURS = 5                          # Claude Code 롤링 윈도우 (시간)
 DEFAULT_POLL_INTERVAL = 600               # 감지 주기 (초, 기본 10분)
 STATE_FILE = Path.home() / ".token_alert_state.json"
+PID_FILE = Path.home() / ".token_alert.pid"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
 
 
@@ -149,6 +150,34 @@ def calculate_reset_time(oldest_ts: datetime, window_hours: int = WINDOW_HOURS) 
 
 
 # ──────────────────────────────────────────
+# 단일 인스턴스 보장 (PID 파일)
+# ──────────────────────────────────────────
+def acquire_pid_lock(pid_file: Path, logger: logging.Logger) -> bool:
+    """PID 파일을 생성해 단일 인스턴스를 보장한다. 이미 실행 중이면 False를 반환한다."""
+    if pid_file.exists():
+        try:
+            existing_pid = int(pid_file.read_text().strip())
+            os.kill(existing_pid, 0)  # 프로세스 존재 여부만 확인 (신호 없음)
+            logger.error(f"이미 실행 중입니다 (PID: {existing_pid}). 종료합니다.")
+            return False
+        except (ProcessLookupError, OSError):
+            logger.warning("오래된 PID 파일 발견, 덮어씁니다.")
+        except ValueError:
+            logger.warning("PID 파일 형식 오류, 덮어씁니다.")
+
+    pid_file.write_text(str(os.getpid()))
+    return True
+
+
+def release_pid_lock(pid_file: Path = PID_FILE) -> None:
+    """PID 파일을 제거한다. 파일이 없어도 예외 없이 종료한다."""
+    try:
+        pid_file.unlink()
+    except FileNotFoundError:
+        pass
+
+
+# ──────────────────────────────────────────
 # 상태 저장/복원
 # ──────────────────────────────────────────
 def load_state() -> dict:
@@ -164,6 +193,55 @@ def load_state() -> dict:
 def save_state(state: dict) -> None:
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+
+
+# ──────────────────────────────────────────
+# 이전 워크플로우 취소
+# ──────────────────────────────────────────
+def cancel_previous_workflow_runs(cfg: dict, logger: logging.Logger) -> None:
+    """진행 중인 이전 token-reset-notify 워크플로우 실행을 모두 취소한다."""
+    token = cfg.get("GITHUB_TOKEN", "")
+    owner = cfg.get("GITHUB_OWNER", "")
+    repo = cfg.get("GITHUB_REPO", "token_alert")
+
+    if not all([token, owner]):
+        return
+
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    list_url = (
+        f"https://api.github.com/repos/{owner}/{repo}/actions/workflows"
+        f"/token-reset-notify.yml/runs?status=in_progress&per_page=10"
+    )
+
+    try:
+        req = urllib.request.Request(list_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, json.JSONDecodeError) as e:
+        logger.warning(f"진행 중 워크플로우 목록 조회 실패: {e}")
+        return
+
+    runs = data.get("workflow_runs", [])
+    for run in runs:
+        run_id = run["id"]
+        cancel_url = (
+            f"https://api.github.com/repos/{owner}/{repo}/actions/runs/{run_id}/cancel"
+        )
+        try:
+            cancel_req = urllib.request.Request(
+                cancel_url, data=b"", headers=headers, method="POST"
+            )
+            with urllib.request.urlopen(cancel_req, timeout=15):
+                pass
+            logger.info(f"이전 워크플로우 취소 완료 (run_id: {run_id})")
+        except urllib.error.HTTPError as e:
+            logger.warning(f"워크플로우 취소 실패 (run_id: {run_id}, HTTP {e.code})")
+        except urllib.error.URLError as e:
+            logger.warning(f"워크플로우 취소 네트워크 오류 (run_id: {run_id}): {e.reason}")
 
 
 # ──────────────────────────────────────────
@@ -197,6 +275,9 @@ def dispatch_github_workflow(
             },
         }
     ).encode("utf-8")
+
+    if not dry_run:
+        cancel_previous_workflow_runs(cfg, logger)
 
     if dry_run:
         logger.info(f"[DRY-RUN] GitHub Actions dispatch — URL: {url}")
@@ -293,6 +374,9 @@ def run_once(cfg: dict, logger: logging.Logger, dry_run: bool = False) -> None:
 
 
 def main() -> None:
+    import atexit
+    import signal
+
     parser = argparse.ArgumentParser(description="Claude Code 토큰 초기화 감지 데몬")
     parser.add_argument("--dry-run", action="store_true", help="실제 dispatch 없이 테스트 실행")
     parser.add_argument("--once", action="store_true", help="한 번만 실행 후 종료 (데몬 없이)")
@@ -301,6 +385,18 @@ def main() -> None:
 
     logger = setup_logging(verbose=args.verbose)
     cfg = load_config()
+
+    if not acquire_pid_lock(PID_FILE, logger):
+        sys.exit(1)
+
+    atexit.register(release_pid_lock)
+
+    def _handle_signal(signum, frame):
+        release_pid_lock()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
 
     logger.info("token_alert 시작")
 

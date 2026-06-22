@@ -109,9 +109,6 @@ def create_plist() -> None:
     <key>KeepAlive</key>
     <true/>
 
-    <key>StandardOutPath</key>
-    <string>{STDOUT_LOG}</string>
-
     <key>StandardErrorPath</key>
     <string>{STDERR_LOG}</string>
 

@@ -18,6 +18,7 @@ platform/macos/             ← macOS 전용: install.py, uninstall.py, tray.py
 platform/windows/           ← Windows 전용: install.py, uninstall.py, tray.py
 config/config.env           ← 설정 파일 (gitignore됨)
 .github/workflows/          ← GitHub Actions 워크플로우
+tests/test_watcher.py       ← watcher.py 단위 테스트 (pytest)
 docs/                       ← 설치 가이드, 설계 문서, 구현 계획
 ```
 
@@ -72,7 +73,10 @@ schtasks /query /tn TokenAlertWatcher
 - 각 jsonl 라인의 `timestamp` 필드를 파싱, 현재 시각 기준 **5시간 이내** 메시지 중 가장 오래된 것을 추출
 - `oldest_timestamp + 5h = 초기화 예정 시각`
 - 직전 예약 시각과 동일하면 중복 dispatch 방지 (`~/.token_alert_state.json`에 저장)
+- dispatch 직전 진행 중인 이전 워크플로우 실행을 모두 취소 (`cancel_previous_workflow_runs`) — 초기화 시각이 바뀔 때 중복 알림 방지
 - GitHub API `POST /repos/{owner}/{repo}/actions/workflows/token-reset-notify.yml/dispatches` 로 `reset_time` 전달
+- 단일 인스턴스 보장: 시작 시 `~/.token_alert.pid` 파일 생성, 이미 실행 중이면 즉시 종료 (`acquire_pid_lock`)
+- 종료 시(`atexit`, `SIGTERM`, `SIGINT`) PID 파일 자동 삭제
 
 ### GitHub Actions (`.github/workflows/token-reset-notify.yml`)
 
@@ -110,7 +114,8 @@ schtasks /query /tn TokenAlertWatcher
 - `~/Library/LaunchAgents/com.token-alert.watcher.plist` 생성 후 `launchctl load`
 - `ProcessType: Background` — 메뉴 바·독 아이콘 없음
 - `KeepAlive: true` — 크래시 시 자동 재시작
-- 로그: `~/.claude/token_alert.log`, `~/.claude/token_alert_error.log`
+- `StandardOutPath` 미설정 — `watcher.py`의 `FileHandler`가 직접 로그 파일에 씀. stdout 리디렉션과 FileHandler가 겹치면 로그가 2번 기록되므로 의도적으로 제외
+- 로그: `~/.claude/token_alert.log`(FileHandler 직접 기록), `~/.claude/token_alert_error.log`(stderr)
 
 ### Windows 데몬 (`platform/windows/install.py`)
 
@@ -138,6 +143,9 @@ schtasks /query /tn TokenAlertWatcher
 - `config/config.env`는 `.gitignore`에 등록됨 — 커밋하지 말 것
 - GitHub Secrets(`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`)는 Actions 워크플로우에서만 사용
 - `--dry-run` 플래그는 `~/.token_alert_state.json`에 상태를 **저장함** — dry-run 후 실제 dispatch가 필요하면 상태 파일 삭제 (`rm ~/.token_alert_state.json`)
+- `--dry-run` 모드에서는 `cancel_previous_workflow_runs` 호출 없음 — 실제 워크플로우가 취소되지 않음
 - `src/watcher.py`는 표준 라이브러리만 사용 — 추가 패키지 불필요
 - Windows tray.py는 `pystray`, `Pillow` 필요 (`pip install pystray Pillow`)
 - macOS에 `timeout` 명령 없음 — GNU coreutils 설치 필요하거나 백그라운드 프로세스+kill 방식 사용
+- 데몬을 재설치할 때(`install.py` 재실행)는 반드시 `uninstall.py` 먼저 실행 — 그렇지 않으면 PID 파일 충돌로 두 번째 인스턴스가 즉시 종료됨
+- 테스트 실행: `python3 -m pytest tests/test_watcher.py -v`

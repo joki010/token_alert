@@ -101,6 +101,12 @@ python platform\windows\uninstall.py
 
 자세한 내용은 [완전 삭제 가이드](docs/uninstall-guide.md)를 참고하세요.
 
+## 테스트
+
+```bash
+python3 -m pytest tests/test_watcher.py -v
+```
+
 ## 요구사항
 
 - macOS 12+
