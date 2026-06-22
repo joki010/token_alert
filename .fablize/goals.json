@@ -1,0 +1,48 @@
+{
+ "brief": "Claude Code 5시간 토큰 초기화 알림 시스템 (token_alert)",
+ "created": "2026-06-19T12:43:52.514281+00:00",
+ "goals": [
+  {
+   "id": "G001",
+   "title": "프로젝트-구조",
+   "objective": "token_alert/ 디렉터리, README, config 템플릿 파일 생성 완료",
+   "status": "complete",
+   "evidence": "README.md, config/config.env.example, .gitignore, 디렉터리 구조(src/, docs/, .github/workflows/, config/) 생성 완료"
+  },
+  {
+   "id": "G002",
+   "title": "감지-로직",
+   "objective": "watcher.py 구현 - jsonl 파싱, 5시간 창 계산, GitHub Actions dispatch",
+   "status": "complete",
+   "evidence": "watcher.py 구현 완료. dry-run --once 실행 결과: jsonl 파싱 성공, 초기화 예정 시각 2026-06-19T16:09:32Z (약 204분 후) 정상 계산. GITHUB_TOKEN 미설정 시 적절한 에러 메시지 출력."
+  },
+  {
+   "id": "G003",
+   "title": "github-actions",
+   "objective": "token-reset-notify.yml 워크플로우 구현 - sleep + Telegram 전송",
+   "status": "complete",
+   "evidence": "token-reset-notify.yml 생성 완료. YAML 파싱 OK. jobs: ['notify'], steps: ['초기화 시각까지 대기', '텔레그램 알림 전송', '완료 요약']. sleep 로직으로 초기화 시각까지 대기 후 Telegram API 호출."
+  },
+  {
+   "id": "G004",
+   "title": "설치-삭제",
+   "objective": "install.py (launchd plist 등록), uninstall.py (완전 삭제) 구현",
+   "status": "complete",
+   "evidence": "install.py, uninstall.py 구문 OK. install.py 실행 시 플랫폼/Python 버전 체크 → config.env 없으면 안내 출력. launchd plist 생성 로직, BackgroundProcessType 설정 포함. uninstall.py 에 데몬 중지, plist 삭제, 상태파일/로그 선택 삭제, 보안 안내 포함."
+  },
+  {
+   "id": "G005",
+   "title": "문서화",
+   "objective": "docs/ 하위 설치·텔레그램·GitHub·삭제 가이드 4개 작성",
+   "status": "complete",
+   "evidence": "docs/ 4개 파일 작성 완료: telegram-setup.md (봇 생성, 채팅ID 획득, 연결 테스트), github-setup.md (PAT 발급, Secrets 등록, Actions 활성화, 수동 테스트), install-guide.md (단계별 설치, 데몬 특성 표, FAQ), uninstall-guide.md (자동/수동 삭제, 외부 서비스 정리 안내)"
+  },
+  {
+   "id": "G006",
+   "title": "검증",
+   "objective": "python3 watcher.py --dry-run 실행 성공, config 예시 유효성 확인",
+   "status": "complete",
+   "evidence": "전체 파일 구조 완성: 10개 핵심 파일. 모든 Python 구문 OK. config.env.example 5개 필수 키 확인. docs 4개 작성 완료."
+  }
+ ]
+}

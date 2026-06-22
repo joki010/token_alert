@@ -1,0 +1,17 @@
+# 민감 정보 포함 파일 — 절대 커밋하지 말 것
+config/config.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# 상태 파일 (로컬 전용)
+.token_alert_state.json
+
+# macOS
+.DS_Store

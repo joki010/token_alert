@@ -1,0 +1,87 @@
+name: Claude Code Token Reset Notify
+
+# workflow_dispatch — 로컬 watcher.py 가 dispatch 함
+on:
+  workflow_dispatch:
+    inputs:
+      reset_time:
+        description: "초기화 예정 시각 (KST, 예: 2026-01-01T21:00:00+09:00)"
+        required: true
+        type: string
+
+jobs:
+  notify:
+    name: Wait and Notify
+    runs-on: ubuntu-latest
+    # 최대 실행 시간 6시간 (GitHub Actions 기본 제한)
+    # Claude Code 5시간 윈도우보다 여유 있음
+    timeout-minutes: 360
+
+    steps:
+      - name: 초기화 시각까지 대기
+        id: wait
+        env:
+          RESET_TIME: ${{ inputs.reset_time }}
+        run: |
+          # UTC 현재 시각
+          NOW=$(date -u +%s)
+
+          # 목표 시각을 epoch 초로 변환 (KST +09:00 포함 ISO 8601)
+          TARGET=$(date -d "$RESET_TIME" +%s 2>/dev/null || echo "0")
+
+          if [ "$TARGET" = "0" ]; then
+            echo "⚠️  시각 파싱 실패: $RESET_TIME"
+            exit 1
+          fi
+
+          DIFF=$((TARGET - NOW))
+          echo "reset_time=$RESET_TIME" >> $GITHUB_OUTPUT
+
+          if [ "$DIFF" -le 0 ]; then
+            echo "✅ 이미 초기화 시각이 지났거나 현재 시각입니다. 즉시 알림 전송."
+          else
+            echo "⏳ ${DIFF}초 대기 중 (약 $((DIFF / 60))분)..."
+            sleep "$DIFF"
+            echo "✅ 대기 완료"
+          fi
+
+      - name: 텔레그램 알림 전송
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RESET_TIME: ${{ inputs.reset_time }}
+        run: |
+          # KST 표시 (입력값이 이미 +09:00 기준)
+          RESET_KST=$(TZ=Asia/Seoul date -d "$RESET_TIME" "+%Y-%m-%d %H:%M KST" 2>/dev/null || echo "$RESET_TIME")
+
+          MESSAGE="🔄 <b>Claude Code 토큰 초기화 완료</b>
+
+          초기화 시각: <code>${RESET_KST}</code>
+          이제 토큰이 새로 충전되었습니다. Claude Code를 다시 사용할 수 있습니다! ✨
+
+          <i>token_alert by GitHub Actions</i>"
+
+          # URL 인코딩 없이 JSON 으로 전송
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
+              \"text\": $(echo "$MESSAGE" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+              \"parse_mode\": \"HTML\"
+            }" | python3 -c "
+          import json, sys
+          r = json.load(sys.stdin)
+          if r.get('ok'):
+              print('✅ 텔레그램 알림 전송 성공')
+          else:
+              print(f'❌ 전송 실패: {r}')
+              sys.exit(1)
+          "
+
+      - name: 완료 요약
+        if: always()
+        run: |
+          echo "### 알림 결과" >> $GITHUB_STEP_SUMMARY
+          echo "- 초기화 시각: \`${{ inputs.reset_time }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 실행 완료: $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY

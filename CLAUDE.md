@@ -1,0 +1,80 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 프로젝트 개요
+
+Claude Code의 5시간 토큰 사용량 창(rolling window)이 초기화되는 시각을 계산하여, 컴퓨터가 꺼진 상태에서도 텔레그램으로 알림을 보내는 도구.
+
+**흐름:** 로컬 데몬 → GitHub Actions dispatch → GitHub 서버에서 sleep → Telegram Bot API
+
+## 주요 명령어
+
+```bash
+# 테스트 실행 (실제 dispatch 없이)
+python3 src/watcher.py --dry-run --once --verbose
+
+# 한 번 실행 후 종료 (실제 dispatch)
+python3 src/watcher.py --once --verbose
+
+# 실시간 로그 확인
+tail -f ~/.claude/token_alert.log
+
+# 데몬 상태 확인
+launchctl list com.token-alert.watcher
+
+# 데몬 재시작 (config 변경 후)
+launchctl unload ~/Library/LaunchAgents/com.token-alert.watcher.plist
+launchctl load ~/Library/LaunchAgents/com.token-alert.watcher.plist
+
+# 설치
+python3 install.py
+
+# 완전 삭제
+python3 uninstall.py
+```
+
+## 아키텍처
+
+### 감지 로직 (`src/watcher.py`)
+
+- `~/.claude/projects/**/*.jsonl` 전체를 glob으로 스캔
+- 각 jsonl 라인의 `timestamp` 필드를 파싱, 현재 시각 기준 **5시간 이내** 메시지 중 가장 오래된 것을 추출
+- `oldest_timestamp + 5h = 초기화 예정 시각`
+- 직전 예약 시각과 동일하면 중복 dispatch 방지 (`~/.token_alert_state.json`에 저장)
+- GitHub API `POST /repos/{owner}/{repo}/actions/workflows/token-reset-notify.yml/dispatches` 로 `reset_time` 전달
+
+### GitHub Actions (`.github/workflows/token-reset-notify.yml`)
+
+- `workflow_dispatch` 트리거, input: `reset_time` (ISO 8601 UTC)
+- `date` 명령으로 현재 시각과 목표 시각 차이 계산 → `sleep $DIFF`
+- 대기 후 `curl`로 Telegram Bot API 호출
+- 최대 실행 시간 360분(6시간) — 5시간 창보다 여유 있음
+
+### 설정 (`config/config.env`)
+
+`load_config()`는 `config/config.env` 파일을 읽은 뒤, 동일 키의 환경 변수가 있으면 덮어씀(환경 변수 우선).
+
+| 키 | 설명 |
+|----|------|
+| `TELEGRAM_BOT_TOKEN` | BotFather 발급 토큰 |
+| `TELEGRAM_CHAT_ID` | 수신자 chat_id |
+| `GITHUB_TOKEN` | PAT (scope: workflow) |
+| `GITHUB_OWNER` | GitHub 사용자명 |
+| `GITHUB_REPO` | 저장소 이름 (기본: `token_alert`) |
+| `POLL_INTERVAL` | 감지 주기 초 (기본: 600) |
+| `NOTIFY_ADVANCE_SECONDS` | 초기화 시각 몇 초 전에 알림 (기본: 0) |
+
+### macOS 데몬 (`install.py`)
+
+- `~/Library/LaunchAgents/com.token-alert.watcher.plist` 생성 후 `launchctl load`
+- `ProcessType: Background` — 메뉴 바·독 아이콘 없음
+- `KeepAlive: true` — 크래시 시 자동 재시작
+- 로그: `~/.claude/token_alert.log`, `~/.claude/token_alert_error.log`
+
+## 주의사항
+
+- `config/config.env`는 `.gitignore`에 등록됨 — 커밋하지 말 것
+- GitHub Secrets(`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`)는 Actions 워크플로우에서만 사용
+- `--dry-run` 플래그는 `~/.token_alert_state.json`에 상태를 **저장함** — 이후 실제 실행 시 "이미 예약됨"으로 건너뛸 수 있으므로, dry-run 후 실제 dispatch가 필요하면 상태 파일을 삭제할 것 (`rm ~/.token_alert_state.json`)
+- Python 표준 라이브러리만 사용 — 추가 패키지 설치 불필요
