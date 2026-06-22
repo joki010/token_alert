@@ -1,13 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller 6.x 문법
+# SPECPATH: 이 spec 파일이 있는 디렉토리 (platform/windows/)
+# 프로젝트 루트는 SPECPATH 기준 두 단계 위
+
+import os
+
+project_root = os.path.abspath(os.path.join(SPECPATH, '..', '..'))
 
 a = Analysis(
-    ['platform/windows/tray.py'],
+    [os.path.join(SPECPATH, 'tray.py')],
     pathex=[],
     binaries=[],
     datas=[
-        ('claudecode-tray.png', '.'),
-        ('claudecode-tray-inactive.png', '.'),
+        (os.path.join(project_root, 'claudecode-tray.png'), '.'),
+        (os.path.join(project_root, 'claudecode-tray-inactive.png'), '.'),
     ],
     hiddenimports=['pystray._win32'],
     hookspath=[],
@@ -21,5 +27,5 @@ exe = EXE(
     name='TokenAlertTray',
     windowed=True,
     onefile=True,
-    icon='claudecode-tray.ico',
+    icon=os.path.join(project_root, 'claudecode-tray.ico'),
 )
