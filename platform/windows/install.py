@@ -39,6 +39,15 @@ def banner(msg: str) -> None:
     print(f"{'─' * 50}")
 
 
+def ask_startup() -> bool:
+    """시작 프로그램 등록 여부를 묻는다. y/Y 이면 True."""
+    try:
+        ans = input("로그인 시 자동 시작으로 등록할까요? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = ""
+    return ans == "y"
+
+
 def check_platform() -> None:
     if sys.platform != "win32":
         print("❌ 이 설치 스크립트는 Windows 전용입니다.")
@@ -192,8 +201,10 @@ def verify_running() -> None:
         ["schtasks", "/query", "/tn", TASK_WATCHER, "/fo", "LIST"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
-    if "Running" in result.stdout:
+    if "Running" in result.stdout or "실행 중" in result.stdout:
         print(f"✅ {TASK_WATCHER} 실행 중")
     else:
         print(f"⚠️  {TASK_WATCHER} 상태를 확인하세요:")
@@ -201,12 +212,18 @@ def verify_running() -> None:
         print(f"   로그: {STDOUT_LOG}")
 
 
-def print_summary() -> None:
+def print_summary(startup_registered: bool = True) -> None:
     banner("설치 완료!")
-    print(f"""
-token_alert 가 백그라운드에서 실행 중입니다.
+    if startup_registered:
+        print("token_alert 가 백그라운드에서 실행 중입니다.\n")
+    else:
+        print("token_alert 파일 설치가 완료되었습니다.")
+        print("자동 시작 미등록 상태입니다.\n")
+        print("수동으로 실행하려면:")
+        print(f"  pythonw.exe {INSTALLED_WATCHER_PY}")
+        print(f"  {TRAY_EXE_DEST}\n")
 
-📋 유용한 명령어:
+    print(f"""📋 유용한 명령어:
   # 상태 확인
   schtasks /query /tn {TASK_WATCHER}
 
@@ -259,12 +276,16 @@ def build_tray_exe() -> None:
     print(f"✅ 빌드 완료: {dist_exe}")
 
 
-def install_tray_exe() -> None:
+def _copy_tray_exe() -> None:
+    """빌드된 exe를 설치 디렉토리로 복사한다."""
     dist_exe = SCRIPT_ROOT / "dist" / "TokenAlertTray.exe"
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
     shutil.copy2(str(dist_exe), str(TRAY_EXE_DEST))
+    print(f"✅ TokenAlertTray.exe 복사 완료: {TRAY_EXE_DEST}")
 
-    # 기존 Task 삭제 후 재등록
+
+def _register_tray_task() -> None:
+    """Task Scheduler에 TokenAlertTray 작업을 등록한다."""
     subprocess.run(["schtasks", "/delete", "/tn", TASK_TRAY, "/f"], capture_output=True)
     result = subprocess.run([
         "schtasks", "/create",
@@ -278,7 +299,13 @@ def install_tray_exe() -> None:
     if result.returncode != 0:
         print(f"❌ Task 등록 실패: {result.stderr.strip()}")
         sys.exit(1)
-    print(f"✅ TokenAlertTray.exe 설치 완료: {TRAY_EXE_DEST}")
+    print(f"✅ TokenAlertTray Task 등록 완료")
+
+
+def install_tray_exe() -> None:
+    """exe 복사 + Task 등록 (자동 시작 선택 시 호출)."""
+    _copy_tray_exe()
+    _register_tray_task()
 
 
 def main() -> None:
@@ -287,20 +314,28 @@ def main() -> None:
     check_python()
     check_pystray()
     check_config()
-    
-    banner("트레이 앱 빌드 및 설치")
+
+    banner("트레이 앱 빌드")
     ensure_pyinstaller()
     convert_icon_to_ico()
     build_tray_exe()
-    install_tray_exe()
-    
+
     banner("파일 설치 (고정 경로)")
     install_watcher_files()
-    banner("Task Scheduler 등록")
-    register_tasks()
-    start_tasks()
-    verify_running()
-    print_summary()
+    _copy_tray_exe()           # exe 복사는 항상 수행
+
+    banner("시작 프로그램 등록")
+    registered = ask_startup()
+    if registered:
+        register_tasks()       # TASK_WATCHER 등록
+        _register_tray_task()  # TASK_TRAY 등록
+        start_tasks()
+        verify_running()
+    else:
+        print("ℹ️  자동 시작 등록을 건너뜁니다.")
+        print(f"   나중에 등록하려면 install.py 를 다시 실행하세요.")
+
+    print_summary(startup_registered=registered)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,15 @@ def banner(msg: str) -> None:
     print(f"{'─' * 50}")
 
 
+def ask_startup() -> bool:
+    """시작 프로그램 등록 여부를 묻는다. y/Y 이면 True."""
+    try:
+        ans = input("로그인 시 자동 시작으로 등록할까요? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ans = ""
+    return ans == "y"
+
+
 def check_platform() -> None:
     if sys.platform != "darwin":
         print("❌ 이 설치 스크립트는 macOS 전용입니다.")
@@ -310,16 +319,29 @@ def install_tray_app() -> None:
     print("✅ 트레이 LaunchAgent 등록 완료")
 
 
-def print_summary() -> None:
+def print_summary(startup_registered: bool = True) -> None:
     banner("설치 완료!")
-    print(f"""
-token_alert 가 백그라운드에서 실행 중입니다.
+    if startup_registered:
+        print("token_alert 가 백그라운드에서 실행 중입니다.\n")
+        print("📋 유용한 명령어:")
+        print(f"  launchctl list {PLIST_LABEL}")
+        print(f"  launchctl list {TRAY_PLIST_LABEL}")
+    else:
+        print("token_alert 파일 설치가 완료되었습니다.")
+        print("자동 시작 미등록 상태입니다.\n")
+        print("📋 수동 실행 및 관리 방법:")
+        print(f"  # 수동 데몬 등록 (시작 프로그램 등록)")
+        print(f"  launchctl load {PLIST_PATH}")
+        print(f"  # 백그라운드 직접 실행")
+        print(f"  nohup {sys.executable} {INSTALLED_WATCHER_PY} >/dev/null 2>&1 &")
 
-📋 유용한 명령어:
-  launchctl list {PLIST_LABEL}
-  launchctl list {TRAY_PLIST_LABEL}
+    print(f"""  # 로그 확인
   tail -f {STDOUT_LOG}
+
+  # 한 번 테스트 실행
   python3 {WATCHER_PY} --dry-run --once --verbose
+
+  # 완전 삭제
   python3 {SCRIPT_DIR}/platform/macos/uninstall.py
 """)
 
@@ -331,15 +353,26 @@ def main() -> None:
     check_config()
     banner("파일 설치 (고정 경로)")
     install_watcher_files()
-    banner("launchd 데몬 등록")
-    create_plist()
-    load_daemon()
-    verify_running()
-    banner("트레이 앱 빌드 및 설치")
-    ensure_py2app()
-    build_tray_app()
-    install_tray_app()
-    print_summary()
+
+    banner("시작 프로그램 등록")
+    registered = ask_startup()
+    if registered:
+        banner("launchd 데몬 등록")
+        create_plist()
+        load_daemon()
+        verify_running()
+        banner("트레이 앱 빌드 및 설치")
+        ensure_py2app()
+        build_tray_app()
+        install_tray_app()
+    else:
+        # plist 파일은 생성해 두되 load 하지 않음
+        create_plist()
+        print("ℹ️  자동 시작 등록을 건너뜁니다.")
+        print(f"   나중에 등록하려면:")
+        print(f"   launchctl load {PLIST_PATH}")
+
+    print_summary(startup_registered=registered)
 
 
 if __name__ == "__main__":
