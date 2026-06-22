@@ -14,6 +14,9 @@ from pathlib import Path
 import pystray
 from PIL import Image
 
+# GUI 앱에서 subprocess 호출 시 콘솔 창이 깜빡이지 않도록
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+
 if getattr(sys, 'frozen', False):
     RESOURCES = Path(sys._MEIPASS)
 else:
@@ -45,16 +48,19 @@ def is_watcher_running() -> bool:
         text=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=_NO_WINDOW,
     )
     return "Running" in result.stdout or "실행 중" in result.stdout
 
 
 def watcher_start() -> None:
-    subprocess.run(["schtasks", "/run", "/tn", TASK_WATCHER], capture_output=True)
+    subprocess.run(["schtasks", "/run", "/tn", TASK_WATCHER],
+                   capture_output=True, creationflags=_NO_WINDOW)
 
 
 def watcher_stop() -> None:
-    subprocess.run(["schtasks", "/end", "/tn", TASK_WATCHER], capture_output=True)
+    subprocess.run(["schtasks", "/end", "/tn", TASK_WATCHER],
+                   capture_output=True, creationflags=_NO_WINDOW)
 
 
 def load_icon(path: Path) -> Image.Image:
