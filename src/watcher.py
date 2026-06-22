@@ -8,6 +8,7 @@ token_alert — Claude Code 5시간 토큰 창 초기화 감지 데몬
   3. 그 타임스탬프 + 5시간 = 다음 초기화 시각 계산
   4. 이전에 예약한 시각과 다를 경우 GitHub Actions workflow 를 dispatch 하여 알림 예약
   5. 컴퓨터가 꺼지더라도 GitHub Actions 가 클라우드에서 대기 후 텔레그램 알림 전송
+  6. 텔레그램 /status 명령으로 다음 초기화까지 남은 시간 즉시 조회 가능
 """
 
 import json
@@ -17,6 +18,7 @@ import time
 import glob
 import logging
 import argparse
+import threading
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -318,6 +320,128 @@ def dispatch_github_workflow(
 
 
 # ──────────────────────────────────────────
+# 텔레그램 봇 명령어 (Long Polling)
+# ──────────────────────────────────────────
+def send_telegram_message(cfg: dict, text: str, logger: logging.Logger, dry_run: bool = False) -> None:
+    """텔레그램 메시지를 전송한다. 실패 시 예외 없이 로그만 남긴다."""
+    if dry_run:
+        logger.info(f"[DRY-RUN] 텔레그램 전송 건너뜀: {text[:80]}")
+        return
+
+    token = cfg.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = cfg.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        logger.warning("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 미설정 — 전송 건너뜀")
+        return
+
+    payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+            if not result.get("ok"):
+                logger.warning(f"텔레그램 전송 실패: {result}")
+    except (urllib.error.URLError, json.JSONDecodeError) as e:
+        logger.warning(f"텔레그램 전송 오류: {e}")
+
+
+def get_telegram_updates(cfg: dict, offset: int, logger: logging.Logger) -> list:
+    """getUpdates long polling으로 텔레그램 업데이트 목록을 가져온다."""
+    token = cfg.get("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        return []
+
+    url = (
+        f"https://api.telegram.org/bot{token}/getUpdates"
+        f"?offset={offset}&timeout=30&allowed_updates=%5B%22message%22%5D"
+    )
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=40) as resp:
+            data = json.loads(resp.read())
+            if data.get("ok"):
+                return data.get("result", [])
+    except (urllib.error.URLError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def handle_telegram_command(cfg: dict, update: dict, logger: logging.Logger, dry_run: bool = False) -> None:
+    """텔레그램 update를 처리하고 명령에 맞는 응답을 전송한다."""
+    message = update.get("message", {})
+    chat_id = str(message.get("chat", {}).get("id", ""))
+    text = message.get("text", "").strip()
+
+    if not chat_id or not text:
+        return
+
+    allowed_chat_id = str(cfg.get("TELEGRAM_CHAT_ID", ""))
+    if chat_id != allowed_chat_id:
+        logger.warning(f"허용되지 않은 chat_id에서 명령 수신: {chat_id}")
+        return
+
+    command = text.split()[0].split("@")[0].lower()
+
+    if command == "/status":
+        KST = timezone(timedelta(hours=9))
+        now = datetime.now(timezone.utc)
+        state = load_state()
+        scheduled = state.get("scheduled_reset_time")
+
+        if scheduled:
+            try:
+                reset_dt = datetime.fromisoformat(scheduled)
+                remaining = reset_dt - now
+                secs = int(remaining.total_seconds())
+                if secs > 0:
+                    hours, rem = divmod(secs, 3600)
+                    minutes = rem // 60
+                    reset_kst = reset_dt.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
+                    if hours > 0:
+                        time_str = f"{hours}시간 {minutes}분"
+                    else:
+                        time_str = f"{minutes}분"
+                    reply = f"⏳ 다음 초기화까지 {time_str} 남았습니다.\n예정 시각: {reset_kst}"
+                else:
+                    reply = "✅ 현재 예약된 초기화 알림이 없습니다.\n(Claude Code를 사용하면 자동으로 감지됩니다)"
+            except ValueError:
+                reply = "✅ 현재 예약된 초기화 알림이 없습니다.\n(Claude Code를 사용하면 자동으로 감지됩니다)"
+        else:
+            reply = "✅ 현재 예약된 초기화 알림이 없습니다.\n(Claude Code를 사용하면 자동으로 감지됩니다)"
+
+        logger.info(f"[BOT] /status 응답: {reply[:60]}")
+        send_telegram_message(cfg, reply, logger, dry_run=dry_run)
+
+    elif command.startswith("/"):
+        reply = "사용 가능한 명령:\n/status — 다음 토큰 초기화까지 남은 시간 조회"
+        send_telegram_message(cfg, reply, logger, dry_run=dry_run)
+
+
+def run_telegram_polling(cfg: dict, logger: logging.Logger, dry_run: bool = False) -> None:
+    """텔레그램 업데이트를 long polling으로 수신하는 루프 (백그라운드 스레드용)."""
+    if not cfg.get("TELEGRAM_BOT_TOKEN"):
+        logger.warning("TELEGRAM_BOT_TOKEN 미설정 — 텔레그램 polling 비활성화")
+        return
+
+    logger.info("텔레그램 봇 polling 시작 (/status 명령 대기 중)")
+    offset = 0
+    while True:
+        try:
+            updates = get_telegram_updates(cfg, offset, logger)
+            for update in updates:
+                handle_telegram_command(cfg, update, logger, dry_run=dry_run)
+                offset = update["update_id"] + 1
+        except Exception as e:
+            logger.warning(f"텔레그램 polling 오류: {e}")
+            time.sleep(5)
+
+
+# ──────────────────────────────────────────
 # 메인 루프
 # ──────────────────────────────────────────
 def run_once(cfg: dict, logger: logging.Logger, dry_run: bool = False) -> None:
@@ -408,6 +532,14 @@ def main() -> None:
     if args.once:
         run_once(cfg, logger, dry_run=args.dry_run)
         return
+
+    # 텔레그램 봇 polling 스레드 시작 (데몬 모드에서만)
+    t = threading.Thread(
+        target=run_telegram_polling,
+        args=(cfg, logger, args.dry_run),
+        daemon=True,
+    )
+    t.start()
 
     # 데몬 루프
     while True:

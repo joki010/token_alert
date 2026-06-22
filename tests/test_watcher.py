@@ -126,5 +126,109 @@ class TestCancelWorkflow(unittest.TestCase):
         self.assertEqual(mock_open.call_count, 3)
 
 
+class TestTelegramBotCommands(unittest.TestCase):
+
+    def _cfg(self):
+        return {
+            "TELEGRAM_BOT_TOKEN": "fake-token",
+            "TELEGRAM_CHAT_ID": "111222333",
+        }
+
+    def _make_logger(self):
+        import logging
+        return logging.getLogger("test")
+
+    def _make_update(self, text: str, chat_id: str = "111222333", update_id: int = 1) -> dict:
+        return {
+            "update_id": update_id,
+            "message": {
+                "text": text,
+                "chat": {"id": int(chat_id)},
+            },
+        }
+
+    def test_status_with_future_reset_time(self):
+        """미래 초기화 시각이 있을 때 남은 시간을 포함한 응답을 전송해야 한다."""
+        from datetime import datetime, timezone, timedelta
+        future = (datetime.now(timezone.utc) + timedelta(hours=1, minutes=23)).astimezone(
+            timezone(timedelta(hours=9))
+        ).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+
+        state = {"scheduled_reset_time": future}
+        sent = []
+
+        with patch.object(watcher, "load_state", return_value=state), \
+             patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+            watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("⏳", sent[0])
+        self.assertIn("남았습니다", sent[0])
+
+    def test_status_with_no_state(self):
+        """예약된 시각이 없을 때 미예약 안내 메시지를 전송해야 한다."""
+        sent = []
+
+        with patch.object(watcher, "load_state", return_value={}), \
+             patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+            watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("✅", sent[0])
+
+    def test_status_with_past_reset_time(self):
+        """초기화 시각이 이미 지났으면 미예약 안내 메시지를 전송해야 한다."""
+        from datetime import datetime, timezone, timedelta
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).astimezone(
+            timezone(timedelta(hours=9))
+        ).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+
+        state = {"scheduled_reset_time": past}
+        sent = []
+
+        with patch.object(watcher, "load_state", return_value=state), \
+             patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+            watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("✅", sent[0])
+
+    def test_unknown_command_sends_help(self):
+        """/status 외 명령에는 사용법 안내를 전송해야 한다."""
+        sent = []
+
+        with patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+            watcher.handle_telegram_command(self._cfg(), self._make_update("/help"), self._make_logger())
+
+        self.assertEqual(len(sent), 1)
+        self.assertIn("/status", sent[0])
+
+    def test_ignores_unknown_chat_id(self):
+        """허용되지 않은 chat_id에서 온 명령은 무시해야 한다."""
+        sent = []
+
+        with patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+            watcher.handle_telegram_command(
+                self._cfg(),
+                self._make_update("/status", chat_id="999999999"),
+                self._make_logger(),
+            )
+
+        self.assertEqual(len(sent), 0)
+
+    def test_dry_run_skips_send(self):
+        """dry_run 모드에서는 실제 전송 없이 로그만 남겨야 한다."""
+        with patch("urllib.request.urlopen") as mock_open, \
+             patch.object(watcher, "load_state", return_value={}):
+            watcher.handle_telegram_command(
+                self._cfg(),
+                self._make_update("/status"),
+                self._make_logger(),
+                dry_run=True,
+            )
+
+        mock_open.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
