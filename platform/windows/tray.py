@@ -4,7 +4,10 @@ token_alert 시스템 트레이 앱 (Windows)
 pystray 기반
 """
 
+import ctypes
+import ctypes.wintypes
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -16,6 +19,7 @@ from PIL import Image
 
 # GUI 앱에서 subprocess 호출 시 콘솔 창이 깜빡이지 않도록
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW
+_NO_WIN_DETACH = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
 
 if getattr(sys, 'frozen', False):
     RESOURCES = Path(sys._MEIPASS)
@@ -26,41 +30,75 @@ ICON_PATH = RESOURCES / "claudecode-tray.png"
 ICON_INACTIVE_PATH = RESOURCES / "claudecode-tray-inactive.png"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
 
-TASK_WATCHER = "TokenAlertWatcher"
 UPDATE_INTERVAL = 10  # 상태 갱신 주기(초)
 ICON_SIZE = (22, 22)
 PID_FILE = Path.home() / ".token_alert.pid"
+WATCHER_PY = Path.home() / ".local" / "lib" / "token_alert" / "src" / "watcher.py"
+
+
+def _find_pythonw() -> Path | None:
+    """pythonw.exe 경로를 찾는다. PATH → python 형제 경로 순으로 탐색."""
+    found = shutil.which("pythonw")
+    if found:
+        return Path(found)
+    python = shutil.which("python")
+    if python:
+        candidate = Path(python).parent / "pythonw.exe"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _pid_exe_path(pid: int) -> str:
+    """Windows API로 PID의 실행 파일 전체 경로를 반환. 외부 프로세스 없이 즉시 반환."""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    k32 = ctypes.windll.kernel32
+    handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(1024)
+        if k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value.lower()
+        return ""
+    finally:
+        k32.CloseHandle(handle)
 
 
 def is_watcher_running() -> bool:
-    """watcher 실행 여부 확인. PID 파일 우선, 없으면 schtasks로 재확인."""
-    if PID_FILE.exists():
-        try:
-            pid = int(PID_FILE.read_text(encoding="utf-8").strip())
-            os.kill(pid, 0)
-            return True
-        except (OSError, ValueError):
-            pass
-    # PID 파일 없거나 스테일: schtasks로 재확인 (한글/영문 Windows 모두 대응)
-    result = subprocess.run(
-        ["schtasks", "/query", "/tn", TASK_WATCHER, "/fo", "LIST"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=_NO_WINDOW,
-    )
-    return "Running" in result.stdout or "실행 중" in result.stdout
+    """PID 파일의 프로세스가 python 계열인지 확인해 watcher 실행 여부를 반환."""
+    if not PID_FILE.exists():
+        return False
+    try:
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+        return "python" in _pid_exe_path(pid)
+    except (OSError, ValueError):
+        return False
 
 
 def watcher_start() -> None:
-    subprocess.run(["schtasks", "/run", "/tn", TASK_WATCHER],
-                   capture_output=True, creationflags=_NO_WINDOW)
+    """watcher.py를 pythonw.exe로 백그라운드 실행."""
+    pythonw = _find_pythonw()
+    if pythonw and WATCHER_PY.exists():
+        subprocess.Popen(
+            [str(pythonw), str(WATCHER_PY)],
+            creationflags=_NO_WIN_DETACH,
+            close_fds=True,
+        )
 
 
 def watcher_stop() -> None:
-    subprocess.run(["schtasks", "/end", "/tn", TASK_WATCHER],
-                   capture_output=True, creationflags=_NO_WINDOW)
+    """PID 파일로 watcher 프로세스를 종료."""
+    if not PID_FILE.exists():
+        return
+    try:
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+        if "python" in _pid_exe_path(pid):
+            os.kill(pid, 9)
+        PID_FILE.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
 
 
 def load_icon(path: Path) -> Image.Image:
