@@ -24,6 +24,12 @@ TASK_WATCHER = "TokenAlertWatcher"
 TASK_TRAY = "TokenAlertTray"
 
 INSTALL_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "TokenAlert"
+
+# 고정 설치 경로
+INSTALL_LIB_DIR = Path.home() / ".local" / "lib" / "token_alert" / "src"
+INSTALLED_WATCHER_PY = INSTALL_LIB_DIR / "watcher.py"
+INSTALLED_CONFIG_DIR = Path.home() / ".config" / "token-alert"
+INSTALLED_CONFIG_ENV = INSTALLED_CONFIG_DIR / "config.env"
 TRAY_EXE_DEST = INSTALL_DIR / "TokenAlertTray.exe"
 
 
@@ -111,6 +117,21 @@ def check_config() -> None:
     print("✅ config.env 유효성 확인 완료")
 
 
+def install_watcher_files() -> None:
+    """watcher.py와 config.env를 고정 위치에 복사합니다."""
+    INSTALL_LIB_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(WATCHER_PY), str(INSTALLED_WATCHER_PY))
+    print(f"✅ watcher.py 설치: {INSTALLED_WATCHER_PY}")
+
+    if CONFIG_ENV.exists():
+        INSTALLED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(CONFIG_ENV), str(INSTALLED_CONFIG_ENV))
+        # Windows에는 chmod 없음 — NTFS 권한은 기본적으로 소유자만 접근
+        print(f"✅ config.env 설치: {INSTALLED_CONFIG_ENV}")
+    else:
+        print("ℹ️  config.env 없음 — 설치 건너뜀 (환경 변수로 대체 가능)")
+
+
 def _register_task(task_name: str, script: Path, use_pythonw: bool = False) -> None:
     """Task Scheduler에 로그인 시 자동 실행 작업을 등록한다."""
     python_dir = Path(sys.executable).parent
@@ -141,7 +162,7 @@ def _register_task(task_name: str, script: Path, use_pythonw: bool = False) -> N
 
 def register_tasks() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _register_task(TASK_WATCHER, WATCHER_PY, use_pythonw=False)
+    _register_task(TASK_WATCHER, INSTALLED_WATCHER_PY, use_pythonw=False)
 
 
 def start_tasks() -> None:
@@ -265,6 +286,8 @@ def main() -> None:
     build_tray_exe()
     install_tray_exe()
     
+    banner("파일 설치 (고정 경로)")
+    install_watcher_files()
     banner("Task Scheduler 등록")
     register_tasks()
     start_tasks()

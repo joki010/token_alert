@@ -21,6 +21,10 @@ TASK_WATCHER = "TokenAlertWatcher"
 TASK_TRAY = "TokenAlertTray"
 INSTALL_DIR = Path(os.environ.get("LOCALAPPDATA", "")) / "TokenAlert"
 
+# 고정 설치 경로
+INSTALL_LIB_DIR = Path.home() / ".local" / "lib" / "token_alert"
+INSTALLED_CONFIG_ENV = Path.home() / ".config" / "token-alert" / "config.env"
+
 
 def banner(msg: str) -> None:
     print(f"\n{'─' * 50}")
@@ -97,6 +101,31 @@ def remove_tray_exe() -> None:
         print(f"ℹ️  트레이 앱 없음: {INSTALL_DIR}")
 
 
+def remove_installed_files() -> None:
+    """고정 경로에 설치된 파일을 삭제합니다."""
+    if INSTALL_LIB_DIR.exists():
+        if confirm(f"설치된 watcher 파일을 삭제할까요? ({INSTALL_LIB_DIR})"):
+            shutil.rmtree(INSTALL_LIB_DIR)
+            print(f"✅ 설치 디렉터리 삭제: {INSTALL_LIB_DIR}")
+        else:
+            print("↩️  설치 디렉터리 보존")
+    else:
+        print(f"ℹ️  설치 디렉터리 없음: {INSTALL_LIB_DIR}")
+
+    if INSTALLED_CONFIG_ENV.exists():
+        if confirm(f"설치된 config.env를 삭제할까요? ({INSTALLED_CONFIG_ENV})"):
+            INSTALLED_CONFIG_ENV.unlink()
+            try:
+                INSTALLED_CONFIG_ENV.parent.rmdir()
+            except OSError:
+                pass
+            print(f"✅ 설치된 config.env 삭제: {INSTALLED_CONFIG_ENV}")
+        else:
+            print("↩️  설치된 config.env 보존")
+    else:
+        print(f"ℹ️  설치된 config.env 없음: {INSTALLED_CONFIG_ENV}")
+
+
 def remind_config() -> None:
     if CONFIG_ENV.exists():
         print(f"""
@@ -125,6 +154,7 @@ def main() -> None:
     remove_state_file()
     remove_logs()
     remove_tray_exe()
+    remove_installed_files()
 
     remind_config()
     banner("삭제 완료!")
