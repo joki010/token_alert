@@ -132,6 +132,12 @@ def install_watcher_files() -> None:
         print("ℹ️  config.env 없음 — 설치 건너뜀 (환경 변수로 대체 가능)")
 
 
+def _current_user() -> str:
+    domain = os.environ.get("USERDOMAIN", "")
+    username = os.environ.get("USERNAME", "")
+    return f"{domain}\\{username}" if domain and domain != username else username
+
+
 def _register_task(task_name: str, script: Path, use_pythonw: bool = False) -> None:
     """Task Scheduler에 로그인 시 자동 실행 작업을 등록한다."""
     python_dir = Path(sys.executable).parent
@@ -145,6 +151,7 @@ def _register_task(task_name: str, script: Path, use_pythonw: bool = False) -> N
             "/tn", task_name,
             "/tr", tr,
             "/sc", "ONLOGON",
+            "/ru", _current_user(),
             "/rl", "LIMITED",
             "/f",
         ],
@@ -264,6 +271,7 @@ def install_tray_exe() -> None:
         "/tn", TASK_TRAY,
         "/tr", f'"{TRAY_EXE_DEST}"',
         "/sc", "ONLOGON",
+        "/ru", _current_user(),
         "/rl", "LIMITED",
         "/f",
     ], capture_output=True, text=True)
