@@ -87,12 +87,18 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     level = logging.DEBUG if verbose else logging.INFO
     fmt = "%(asctime)s [%(levelname)s] %(message)s"
+    stream_handler = logging.StreamHandler(sys.stdout)
+    if hasattr(stream_handler.stream, 'reconfigure'):
+        try:
+            stream_handler.stream.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
     logging.basicConfig(
         level=level,
         format=fmt,
         handlers=[
             logging.FileHandler(LOG_FILE, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
+            stream_handler,
         ],
     )
     return logging.getLogger("token_alert")
@@ -473,21 +479,32 @@ def run_once(cfg: dict, logger: logging.Logger, dry_run: bool = False) -> None:
     reset_time = calculate_reset_time(oldest_ts)
     now = datetime.now(timezone.utc)
 
-    # 이미 지난 초기화 시각은 무시
-    if reset_time <= now:
-        logger.debug(f"초기화 시각({reset_time.isoformat()})이 이미 지났음 — 건너뜀")
+    # 이미 지났거나 너무 임박한 초기화 시각은 무시 (GitHub Actions 지연 고려, 최소 5분)
+    MIN_DISPATCH_SECONDS = 300
+    remaining_secs = (reset_time - now).total_seconds()
+    if remaining_secs <= MIN_DISPATCH_SECONDS:
+        logger.debug(f"초기화까지 {int(remaining_secs)}초 미만 — dispatch 건너뜀")
         state = load_state()
-        if "scheduled_reset_time" in state:
+        if "scheduled_reset_time" in state and remaining_secs <= 0:
             state.pop("scheduled_reset_time", None)
             save_state(state)
         return
 
-    # 이미 같은 시각으로 예약했으면 중복 dispatch 방지
+    # 이미 같은 시각으로 예약했으면 중복 dispatch 방지 (1분 이내 차이도 건너뜀)
     state = load_state()
     prev_scheduled = state.get("scheduled_reset_time")
 
     KST = timezone(timedelta(hours=9))
     reset_iso = reset_time.astimezone(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+    if prev_scheduled:
+        try:
+            prev_dt = datetime.fromisoformat(prev_scheduled)
+            diff_secs = abs((reset_time - prev_dt).total_seconds())
+            if diff_secs < 60:
+                logger.debug(f"이미 예약됨 (차이 {int(diff_secs)}초): {prev_scheduled} — 중복 dispatch 건너뜀")
+                return
+        except ValueError:
+            pass
     if prev_scheduled == reset_iso:
         logger.debug(f"이미 예약됨: {reset_iso} — 중복 dispatch 건너뜀")
         return
