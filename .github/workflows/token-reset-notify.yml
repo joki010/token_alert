@@ -9,6 +9,10 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: token-reset-notify
+  cancel-in-progress: true
+
 jobs:
   notify:
     name: Wait and Notify

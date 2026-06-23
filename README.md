@@ -215,3 +215,20 @@ python3 -m pytest tests/test_watcher.py -v
 
 - [텔레그램 봇 설정](docs/telegram-setup.md)
 - [GitHub Actions 설정](docs/github-setup.md)
+
+---
+
+## 변경 이력
+
+### v1.1.0 (2026-06-23)
+
+- **맥+윈도우 동시 실행 시 중복 알림 방지**: GitHub Actions `concurrency` 그룹 설정 추가  
+  동일 그룹(`token-reset-notify`) 내 새 dispatch가 들어오면 기존 실행을 자동 취소하여, 어느 플랫폼에서 dispatch하든 항상 최신 run 하나만 유지됩니다.
+
+### v1.0.0 (2026-06-22)
+
+- macOS (launchd + rumps 트레이), Windows (레지스트리 시작 프로그램 + pystray 트레이) 지원
+- Claude Code JSONL 파일 모니터링 → GitHub Actions dispatch → 텔레그램 알림
+- `/status` 텔레그램 명령으로 남은 시간 즉시 조회
+- PID 잠금 + 상태 파일 기반 중복 dispatch 방지
+- 이전 워크플로우 실행 자동 취소 (`cancel_previous_workflow_runs`)
