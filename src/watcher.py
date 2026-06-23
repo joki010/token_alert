@@ -172,16 +172,45 @@ def calculate_reset_time(oldest_ts: datetime, window_hours: int = WINDOW_HOURS) 
 # ──────────────────────────────────────────
 # 단일 인스턴스 보장 (PID 파일)
 # ──────────────────────────────────────────
+def _is_python_process(pid: int) -> bool:
+    """PID가 python 계열 프로세스인지 확인. 플랫폼별 방식 사용."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            import ctypes.wintypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            k32 = ctypes.windll.kernel32
+            handle = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            try:
+                buf = ctypes.create_unicode_buffer(1024)
+                size = ctypes.c_ulong(1024)
+                if k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    return "python" in buf.value.lower()
+                return False
+            finally:
+                k32.CloseHandle(handle)
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, OSError):
+            return False
+
+
 def acquire_pid_lock(pid_file: Path, logger: logging.Logger) -> bool:
     """PID 파일을 생성해 단일 인스턴스를 보장한다. 이미 실행 중이면 False를 반환한다."""
     if pid_file.exists():
         try:
             existing_pid = int(pid_file.read_text().strip())
-            os.kill(existing_pid, 0)  # 프로세스 존재 여부만 확인 (신호 없음)
-            logger.error(f"이미 실행 중입니다 (PID: {existing_pid}). 종료합니다.")
-            return False
-        except (ProcessLookupError, OSError):
-            logger.warning("오래된 PID 파일 발견, 덮어씁니다.")
+            if _is_python_process(existing_pid):
+                logger.error(f"이미 실행 중입니다 (PID: {existing_pid}). 종료합니다.")
+                return False
+            else:
+                logger.warning("오래된 PID 파일 발견, 덮어씁니다.")
         except ValueError:
             logger.warning("PID 파일 형식 오류, 덮어씁니다.")
 
@@ -232,20 +261,20 @@ def cancel_previous_workflow_runs(cfg: dict, logger: logging.Logger) -> None:
         "Accept": "application/vnd.github.v3+json",
     }
 
-    list_url = (
-        f"https://api.github.com/repos/{owner}/{repo}/actions/workflows"
-        f"/token-reset-notify.yml/runs?status=in_progress&per_page=10"
-    )
+    runs = []
+    for status in ("in_progress", "queued"):
+        list_url = (
+            f"https://api.github.com/repos/{owner}/{repo}/actions/workflows"
+            f"/token-reset-notify.yml/runs?status={status}&per_page=10"
+        )
+        try:
+            req = urllib.request.Request(list_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            runs.extend(data.get("workflow_runs", []))
+        except (urllib.error.URLError, json.JSONDecodeError) as e:
+            logger.warning(f"진행 중 워크플로우 목록 조회 실패 (status={status}): {e}")
 
-    try:
-        req = urllib.request.Request(list_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, json.JSONDecodeError) as e:
-        logger.warning(f"진행 중 워크플로우 목록 조회 실패: {e}")
-        return
-
-    runs = data.get("workflow_runs", [])
     for run in runs:
         run_id = run["id"]
         cancel_url = (
