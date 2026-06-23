@@ -172,7 +172,11 @@ def start_tasks() -> None:
     except Exception as e:
         print(f"⚠️  시작 실패 ({TASK_WATCHER}): {e}")
     try:
-        subprocess.Popen([str(TRAY_EXE_DEST)], creationflags=subprocess.DETACHED_PROCESS, close_fds=True)
+        subprocess.Popen(
+            [str(TRAY_EXE_DEST)],
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+            close_fds=True,
+        )
         print(f"✅ 즉시 시작: {TASK_TRAY}")
     except Exception as e:
         print(f"⚠️  시작 실패 ({TASK_TRAY}): {e}")
@@ -228,12 +232,18 @@ def convert_icon_to_ico() -> None:
 
 
 def ensure_pyinstaller() -> None:
+    _NO_WIN = subprocess.CREATE_NO_WINDOW
     result = subprocess.run(
         [sys.executable, "-c", "import PyInstaller"],
         capture_output=True,
+        creationflags=_NO_WIN,
     )
     if result.returncode != 0:
-        subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"], check=True)
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "pyinstaller"],
+            check=True,
+            creationflags=_NO_WIN,
+        )
     print("✅ PyInstaller 준비 완료")
 
 

@@ -25,7 +25,8 @@ exe = EXE(
     a.binaries,
     a.datas,
     name='TokenAlertTray',
-    windowed=True,
+    console=False,      # 콘솔 창 완전 억제 (windowed=True 와 동일, PyInstaller 6.x 권장 표기)
+    windowed=True,      # 호환성을 위해 병기
     onefile=True,
     icon=os.path.join(project_root, 'claudecode-tray.ico'),
 )
