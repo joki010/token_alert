@@ -130,56 +130,12 @@ class TestCancelWorkflow(unittest.TestCase):
         # 목록 2번 + 취소 시도 2번(1번 실패해도 계속)
         self.assertEqual(mock_open.call_count, 4)
 
-    def test_parse_run_reset_time(self):
-        """display_title(우선) 및 inputs.reset_time(폴백)에서 reset_time을 올바르게 파싱해야 한다."""
-        from datetime import timezone, timedelta
-        KST = timezone(timedelta(hours=9))
-
-        # display_title 우선 (run-name → API보장 필드)
-        run_display = {"display_title": "2026-06-24T15:00:00+09:00"}
-        result = watcher._parse_run_reset_time(run_display)
-        self.assertIsNotNone(result)
-        self.assertEqual(result.astimezone(KST).strftime("%H:%M"), "15:00")
-
-        # inputs 폴백 (display_title 없을 때)
-        run_inputs = {"inputs": {"reset_time": "2026-06-24T16:00:00+09:00"}}
-        result2 = watcher._parse_run_reset_time(run_inputs)
-        self.assertIsNotNone(result2)
-        self.assertEqual(result2.astimezone(KST).strftime("%H:%M"), "16:00")
-
-        # 둘 다 없는 경우 → None
-        self.assertIsNone(watcher._parse_run_reset_time({}))
-        self.assertIsNone(watcher._parse_run_reset_time({"inputs": None}))
-        self.assertIsNone(watcher._parse_run_reset_time({"inputs": {"other": "val"}}))
-
-    def test_dispatch_skips_when_earlier_pending_run_exists(self):
-        """기존 예약 시각이 더 이른 경우 dispatch를 건너뛰어야 한다 (맥/윈도우 동시 실행 충돌 방지)."""
+    def test_dispatch_proceeds_when_pending_run_exists(self):
+        """pending run이 있어도 취소 후 dispatch를 진행해야 한다."""
         from datetime import datetime, timezone, timedelta
 
         cfg = self._cfg()
 
-        # 기존 pending run: display_title에 15:00 KST
-        pending_run = {"id": 999, "display_title": "2026-06-24T15:00:00+09:00"}
-
-        # 현재 계산된 reset_time: 15:30 KST (더 늦음)
-        KST = timezone(timedelta(hours=9))
-        later_reset = datetime(2026, 6, 24, 15, 30, 0, tzinfo=KST)
-
-        with patch.object(watcher, "_get_pending_runs", return_value=[pending_run]), \
-             patch("urllib.request.urlopen") as mock_open:
-            result = watcher.dispatch_github_workflow(cfg, later_reset, self._make_logger(), dry_run=False)
-
-        # dispatch 건너뜀 → urlopen 호출 없어야 함
-        self.assertFalse(result)
-        mock_open.assert_not_called()
-
-    def test_dispatch_proceeds_when_no_parseable_pending_run(self):
-        """pending run에서 reset_time 파싱 불가(display_title·inputs 모두 없음)면 dispatch 진행해야 한다."""
-        from datetime import datetime, timezone, timedelta
-
-        cfg = self._cfg()
-
-        # display_title·inputs 모두 없는 run (API 필드 누락 폴백 검증)
         pending_run = {"id": 999}
         KST = timezone(timedelta(hours=9))
         reset_time = datetime(2026, 6, 24, 15, 30, 0, tzinfo=KST)

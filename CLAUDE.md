@@ -74,7 +74,7 @@ type %USERPROFILE%\.token_alert.pid
 - `/status` 텔레그램 명령도 동일 우선순위로 초기화 시각 조회 (dispatch 상태와 무관하게 실시간 정확한 값 표시)
 - 직전 예약 시각과 동일하면 중복 dispatch 방지 (`~/.token_alert_state.json`에 저장)
 - dispatch 직전 진행 중인 이전 워크플로우 실행을 모두 취소 (`cancel_previous_workflow_runs`) — 초기화 시각이 바뀔 때 중복 알림 방지
-- **맥/윈도우 동시 실행 충돌 방지**: dispatch 전 `_get_pending_runs`로 진행 중인 워크플로우 조회, `_parse_run_reset_time`으로 `display_title` 파싱 → 기존 예약 시각이 60초 초과로 이른 경우 dispatch 건너뜀
+- **맥/윈도우 동시 실행 중복 알림 방지**: GitHub Actions `concurrency: cancel-in-progress: true`가 담당 — 어느 머신이 dispatch해도 마지막 실행만 살아남음
 - GitHub API `POST /repos/{owner}/{repo}/actions/workflows/token-reset-notify.yml/dispatches` 로 `reset_time` 전달
 - `load_config()`는 `~/.config/token-alert/config.env` → 소스 경로 순으로 탐색 (고정 경로 우선)
 - 단일 인스턴스 보장: 시작 시 `~/.token_alert.pid` 파일 생성, 이미 실행 중이면 즉시 종료 (`acquire_pid_lock`)
@@ -83,7 +83,7 @@ type %USERPROFILE%\.token_alert.pid
 ### GitHub Actions (`.github/workflows/token-reset-notify.yml`)
 
 - `workflow_dispatch` 트리거, input: `reset_time` (KST ISO 8601, 예: `2026-06-20T12:00:00+09:00`)
-- `run-name: ${{ inputs.reset_time }}` 필수 — GitHub API 워크플로우 목록에서 `inputs` 필드 미보장, `display_title`(run-name 값)은 보장됨; `_parse_run_reset_time`이 이를 사용
+- `run-name: ${{ inputs.reset_time }}` — 워크플로우 실행 이름에 초기화 시각 표시
 - `date` 명령으로 현재 시각과 목표 시각 차이 계산 → `sleep $DIFF`
 - 대기 후 `curl`로 Telegram Bot API 호출
 - 최대 실행 시간 360분(6시간) — 5시간 창보다 여유 있음

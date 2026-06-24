@@ -269,24 +269,6 @@ def save_state(state: dict) -> None:
 # ──────────────────────────────────────────
 # 이전 워크플로우 취소
 # ──────────────────────────────────────────
-def _parse_run_reset_time(run: dict) -> datetime | None:
-    """workflow run에서 reset_time을 파싱해 반환한다. 없으면 None.
-
-    display_title(run-name)을 우선 읽는다 — runs list API에서 보장되는 필드.
-    inputs.reset_time은 API 버전에 따라 없을 수 있으므로 폴백으로만 사용.
-    """
-    raw = (
-        run.get("display_title")
-        or (run.get("inputs") or {}).get("reset_time")
-    )
-    if not raw:
-        return None
-    try:
-        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-
 
 def _get_pending_runs(cfg: dict, logger: logging.Logger) -> list:
     """in_progress 및 queued 상태의 token-reset-notify 워크플로우 실행 목록을 반환한다."""
@@ -388,16 +370,6 @@ def dispatch_github_workflow(
 
     if not dry_run:
         pending_runs = _get_pending_runs(cfg, logger)
-        # 맥/윈도우 동시 실행 충돌 방지: 이미 더 이른 reset_time이 예약된 경우 dispatch 건너뜀.
-        # 더 이른 쪽이 실제 초기화 시각에 가까우므로 그 알림이 유효하다.
-        for run in pending_runs:
-            pending_rt = _parse_run_reset_time(run)
-            if pending_rt is not None and pending_rt < reset_time - timedelta(seconds=60):
-                logger.info(
-                    f"기존 예약 시각({pending_rt.isoformat()})이 더 이르므로 dispatch 건너뜀 "
-                    f"(현재 계산: {reset_time.isoformat()})"
-                )
-                return False
         cancel_previous_workflow_runs(cfg, logger, pending_runs)
 
     if dry_run:
