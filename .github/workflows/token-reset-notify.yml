@@ -1,4 +1,5 @@
 name: Claude Code Token Reset Notify
+run-name: ${{ inputs.reset_time }}
 
 # workflow_dispatch — 로컬 watcher.py 가 dispatch 함
 on:

@@ -82,17 +82,19 @@ class TestCancelWorkflow(unittest.TestCase):
 
     def test_cancels_all_in_progress_runs(self):
         """진행 중인 워크플로우 실행이 2개면 취소 요청을 2번 보내야 한다."""
+        # _get_pending_runs은 in_progress + queued 두 번 조회함
         list_resp = self._make_response({"workflow_runs": [{"id": 111}, {"id": 222}]})
+        list_empty = self._make_response({"workflow_runs": []})
         cancel_resp = self._make_response({}, status=202)
 
-        with patch("urllib.request.urlopen", side_effect=[list_resp, cancel_resp, cancel_resp]) as mock_open:
+        with patch("urllib.request.urlopen", side_effect=[list_resp, list_empty, cancel_resp, cancel_resp]) as mock_open:
             watcher.cancel_previous_workflow_runs(self._cfg(), self._make_logger())
 
-        # 첫 번째 호출 = 목록 조회, 두 번째·세 번째 = 취소
-        self.assertEqual(mock_open.call_count, 3)
+        # 목록 조회 2번(in_progress, queued) + 취소 2번
+        self.assertEqual(mock_open.call_count, 4)
         cancel_urls = [
-            mock_open.call_args_list[1][0][0].full_url,
             mock_open.call_args_list[2][0][0].full_url,
+            mock_open.call_args_list[3][0][0].full_url,
         ]
         self.assertIn("runs/111/cancel", cancel_urls[0])
         self.assertIn("runs/222/cancel", cancel_urls[1])
@@ -104,7 +106,8 @@ class TestCancelWorkflow(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=list_resp) as mock_open:
             watcher.cancel_previous_workflow_runs(self._cfg(), self._make_logger())
 
-        self.assertEqual(mock_open.call_count, 1)  # 목록 조회 1번만
+        # in_progress + queued 목록 조회 2번, 취소 없음
+        self.assertEqual(mock_open.call_count, 2)
 
     def test_skips_cancel_when_no_credentials(self):
         """GITHUB_TOKEN 또는 GITHUB_OWNER 가 없으면 API 호출 없이 종료해야 한다."""
@@ -117,13 +120,81 @@ class TestCancelWorkflow(unittest.TestCase):
         """개별 취소 실패(HTTPError)가 나머지 취소를 막지 않아야 한다."""
         import urllib.error
         list_resp = self._make_response({"workflow_runs": [{"id": 111}, {"id": 222}]})
+        list_empty = self._make_response({"workflow_runs": []})
         cancel_resp = self._make_response({}, status=202)
         http_err = urllib.error.HTTPError(url="", code=409, msg="", hdrs=None, fp=None)
 
-        with patch("urllib.request.urlopen", side_effect=[list_resp, http_err, cancel_resp]) as mock_open:
+        with patch("urllib.request.urlopen", side_effect=[list_resp, list_empty, http_err, cancel_resp]) as mock_open:
             watcher.cancel_previous_workflow_runs(self._cfg(), self._make_logger())
 
-        self.assertEqual(mock_open.call_count, 3)
+        # 목록 2번 + 취소 시도 2번(1번 실패해도 계속)
+        self.assertEqual(mock_open.call_count, 4)
+
+    def test_parse_run_reset_time(self):
+        """display_title(우선) 및 inputs.reset_time(폴백)에서 reset_time을 올바르게 파싱해야 한다."""
+        from datetime import timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+
+        # display_title 우선 (run-name → API보장 필드)
+        run_display = {"display_title": "2026-06-24T15:00:00+09:00"}
+        result = watcher._parse_run_reset_time(run_display)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.astimezone(KST).strftime("%H:%M"), "15:00")
+
+        # inputs 폴백 (display_title 없을 때)
+        run_inputs = {"inputs": {"reset_time": "2026-06-24T16:00:00+09:00"}}
+        result2 = watcher._parse_run_reset_time(run_inputs)
+        self.assertIsNotNone(result2)
+        self.assertEqual(result2.astimezone(KST).strftime("%H:%M"), "16:00")
+
+        # 둘 다 없는 경우 → None
+        self.assertIsNone(watcher._parse_run_reset_time({}))
+        self.assertIsNone(watcher._parse_run_reset_time({"inputs": None}))
+        self.assertIsNone(watcher._parse_run_reset_time({"inputs": {"other": "val"}}))
+
+    def test_dispatch_skips_when_earlier_pending_run_exists(self):
+        """기존 예약 시각이 더 이른 경우 dispatch를 건너뛰어야 한다 (맥/윈도우 동시 실행 충돌 방지)."""
+        from datetime import datetime, timezone, timedelta
+
+        cfg = self._cfg()
+
+        # 기존 pending run: display_title에 15:00 KST
+        pending_run = {"id": 999, "display_title": "2026-06-24T15:00:00+09:00"}
+
+        # 현재 계산된 reset_time: 15:30 KST (더 늦음)
+        KST = timezone(timedelta(hours=9))
+        later_reset = datetime(2026, 6, 24, 15, 30, 0, tzinfo=KST)
+
+        with patch.object(watcher, "_get_pending_runs", return_value=[pending_run]), \
+             patch("urllib.request.urlopen") as mock_open:
+            result = watcher.dispatch_github_workflow(cfg, later_reset, self._make_logger(), dry_run=False)
+
+        # dispatch 건너뜀 → urlopen 호출 없어야 함
+        self.assertFalse(result)
+        mock_open.assert_not_called()
+
+    def test_dispatch_proceeds_when_no_parseable_pending_run(self):
+        """pending run에서 reset_time 파싱 불가(display_title·inputs 모두 없음)면 dispatch 진행해야 한다."""
+        from datetime import datetime, timezone, timedelta
+
+        cfg = self._cfg()
+
+        # display_title·inputs 모두 없는 run (API 필드 누락 폴백 검증)
+        pending_run = {"id": 999}
+        KST = timezone(timedelta(hours=9))
+        reset_time = datetime(2026, 6, 24, 15, 30, 0, tzinfo=KST)
+
+        dispatch_resp = MagicMock()
+        dispatch_resp.status = 204
+        dispatch_resp.__enter__ = lambda s: s
+        dispatch_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(watcher, "_get_pending_runs", return_value=[pending_run]), \
+             patch("urllib.request.urlopen", return_value=dispatch_resp):
+            result = watcher.dispatch_github_workflow(cfg, reset_time, self._make_logger(), dry_run=False)
+
+        # reset_time 파싱 못해도 dispatch는 진행
+        self.assertTrue(result)
 
 
 class TestTelegramBotCommands(unittest.TestCase):

@@ -74,6 +74,7 @@ type %USERPROFILE%\.token_alert.pid
 - `oldest_timestamp + 5h = 초기화 예정 시각`
 - 직전 예약 시각과 동일하면 중복 dispatch 방지 (`~/.token_alert_state.json`에 저장)
 - dispatch 직전 진행 중인 이전 워크플로우 실행을 모두 취소 (`cancel_previous_workflow_runs`) — 초기화 시각이 바뀔 때 중복 알림 방지
+- **맥/윈도우 동시 실행 충돌 방지**: dispatch 전 `_get_pending_runs`로 진행 중인 워크플로우 조회, `_parse_run_reset_time`으로 `display_title` 파싱 → 기존 예약 시각이 60초 초과로 이른 경우 dispatch 건너뜀
 - GitHub API `POST /repos/{owner}/{repo}/actions/workflows/token-reset-notify.yml/dispatches` 로 `reset_time` 전달
 - `load_config()`는 `~/.config/token-alert/config.env` → 소스 경로 순으로 탐색 (고정 경로 우선)
 - 단일 인스턴스 보장: 시작 시 `~/.token_alert.pid` 파일 생성, 이미 실행 중이면 즉시 종료 (`acquire_pid_lock`)
@@ -82,6 +83,7 @@ type %USERPROFILE%\.token_alert.pid
 ### GitHub Actions (`.github/workflows/token-reset-notify.yml`)
 
 - `workflow_dispatch` 트리거, input: `reset_time` (KST ISO 8601, 예: `2026-06-20T12:00:00+09:00`)
+- `run-name: ${{ inputs.reset_time }}` 필수 — GitHub API 워크플로우 목록에서 `inputs` 필드 미보장, `display_title`(run-name 값)은 보장됨; `_parse_run_reset_time`이 이를 사용
 - `date` 명령으로 현재 시각과 목표 시각 차이 계산 → `sleep $DIFF`
 - 대기 후 `curl`로 Telegram Bot API 호출
 - 최대 실행 시간 360분(6시간) — 5시간 창보다 여유 있음
@@ -102,6 +104,7 @@ type %USERPROFILE%\.token_alert.pid
 - **macOS Tahoe(26+) 필수**: `autosaveName` 없는 `NSStatusItem`은 기본값 숨김 → `setAutosaveName_("TokenAlert")`을 `@rumps.timer(0.1)`로 run loop 시작 후 설정 (`_nsapp.nsstatusitem`은 `app.run()` 이후에만 접근 가능)
 - 설치 시 `defaults write com.apple.controlcenter "NSStatusItem Visible TokenAlert" -bool true` 필수 — 미실행 시 아이콘이 맥 메뉴바에 나타나지 않음
 - py2app으로 번들링: `platform/macos/setup_tray.py` 설정 파일, 출력은 `dist/TokenAlertTray.app`; `CFBundleName`이 바이너리 이름 결정
+- 빌드 명령: `.venv/bin/python platform/macos/setup_tray.py py2app` (소스 디렉터리에서 실행; py2app은 venv에 설치됨)
 - 번들 후 애드혹 서명 필요: `codesign --force --deep --sign - ~/Applications/TokenAlertTray.app`
 - LaunchAgent plist에 `LimitLoadToSessionType = Aqua` 필요 — GUI/메뉴바 앱은 Aqua 세션에서만 동작
 
