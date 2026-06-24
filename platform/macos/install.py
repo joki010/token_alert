@@ -261,11 +261,14 @@ def install_tray_app() -> None:
         shutil.rmtree(TRAY_APP_DEST)
     shutil.copytree(str(dist_app), str(TRAY_APP_DEST))
 
-    # ad-hoc 서명 (Gatekeeper 없이 로컬 실행 가능하도록)
-    subprocess.run(
-        ["codesign", "--force", "--deep", "--sign", "-", str(TRAY_APP_DEST)],
-        capture_output=True,
-    )
+    # ad-hoc 서명 (--deep은 Python.framework 포함 번들에서 실패 → 순서대로 서명)
+    py_current = TRAY_APP_DEST / "Contents" / "Frameworks" / "Python.framework" / "Versions" / "Current"
+    py_binary = py_current / "Python"
+    for target in [py_binary, py_current, TRAY_APP_DEST]:
+        subprocess.run(
+            ["codesign", "--force", "--sign", "-", str(target)],
+            capture_output=True,
+        )
 
     # macOS Tahoe: controlcenter에 NSStatusItem 표시 등록
     subprocess.run([

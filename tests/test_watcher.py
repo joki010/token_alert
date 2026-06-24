@@ -219,7 +219,7 @@ class TestTelegramBotCommands(unittest.TestCase):
         }
 
     def test_status_with_future_reset_time(self):
-        """미래 초기화 시각이 있을 때 남은 시간을 포함한 응답을 전송해야 한다."""
+        """미래 초기화 시각이 있을 때 남은 시간을 포함한 응답을 전송해야 한다 (state 파일 폴백)."""
         from datetime import datetime, timezone, timedelta
         future = (datetime.now(timezone.utc) + timedelta(hours=1, minutes=23)).astimezone(
             timezone(timedelta(hours=9))
@@ -228,7 +228,8 @@ class TestTelegramBotCommands(unittest.TestCase):
         state = {"scheduled_reset_time": future}
         sent = []
 
-        with patch.object(watcher, "load_state", return_value=state), \
+        with patch.object(watcher, "read_reset_time_from_usage_file", return_value=None), \
+             patch.object(watcher, "load_state", return_value=state), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
 
@@ -236,11 +237,32 @@ class TestTelegramBotCommands(unittest.TestCase):
         self.assertIn("⏳", sent[0])
         self.assertIn("남았습니다", sent[0])
 
+    def test_status_usage_file_takes_priority_over_state(self):
+        """usage 파일 값이 있으면 state 파일보다 우선하여 응답해야 한다."""
+        from datetime import datetime, timezone, timedelta
+        usage_reset = datetime.now(timezone.utc) + timedelta(hours=3)
+        load_state_calls = []
+
+        def fake_load_state():
+            load_state_calls.append(1)
+            return {"scheduled_reset_time": "2000-01-01T00:00:00+09:00"}
+
+        sent = []
+        with patch.object(watcher, "read_reset_time_from_usage_file", return_value=usage_reset), \
+             patch.object(watcher, "load_state", side_effect=fake_load_state), \
+             patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+            watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
+
+        self.assertEqual(len(load_state_calls), 0, "usage 파일 성공 시 load_state 호출 없어야 함")
+        self.assertEqual(len(sent), 1)
+        self.assertIn("⏳", sent[0])
+
     def test_status_with_no_state(self):
         """예약된 시각이 없을 때 미예약 안내 메시지를 전송해야 한다."""
         sent = []
 
-        with patch.object(watcher, "load_state", return_value={}), \
+        with patch.object(watcher, "read_reset_time_from_usage_file", return_value=None), \
+             patch.object(watcher, "load_state", return_value={}), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
 
@@ -257,7 +279,8 @@ class TestTelegramBotCommands(unittest.TestCase):
         state = {"scheduled_reset_time": past}
         sent = []
 
-        with patch.object(watcher, "load_state", return_value=state), \
+        with patch.object(watcher, "read_reset_time_from_usage_file", return_value=None), \
+             patch.object(watcher, "load_state", return_value=state), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
 

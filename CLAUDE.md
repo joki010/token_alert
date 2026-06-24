@@ -69,9 +69,9 @@ type %USERPROFILE%\.token_alert.pid
 
 ### 감지 로직 (`src/watcher.py`)
 
-- `~/.claude/projects/**/*.jsonl` 전체를 glob으로 스캔
-- 각 jsonl 라인의 `timestamp` 필드를 파싱, 현재 시각 기준 **5시간 이내** 메시지 중 가장 오래된 것을 추출
-- `oldest_timestamp + 5h = 초기화 예정 시각`
+- `~/.claude/token_alert_usage.json`의 `five_hour_resets_at`(Unix timestamp) 우선 읽음 — Claude Code가 서버 응답 기반으로 기록하는 실제 초기화 시각
+- 해당 파일 없거나 필드 없으면 폴백: `~/.claude/projects/**/*.jsonl` 전체를 glob으로 스캔 → 현재 시각 기준 5시간 이내 가장 오래된 타임스탬프 + 5h
+- `/status` 텔레그램 명령도 동일 우선순위로 초기화 시각 조회 (dispatch 상태와 무관하게 실시간 정확한 값 표시)
 - 직전 예약 시각과 동일하면 중복 dispatch 방지 (`~/.token_alert_state.json`에 저장)
 - dispatch 직전 진행 중인 이전 워크플로우 실행을 모두 취소 (`cancel_previous_workflow_runs`) — 초기화 시각이 바뀔 때 중복 알림 방지
 - **맥/윈도우 동시 실행 충돌 방지**: dispatch 전 `_get_pending_runs`로 진행 중인 워크플로우 조회, `_parse_run_reset_time`으로 `display_title` 파싱 → 기존 예약 시각이 60초 초과로 이른 경우 dispatch 건너뜀
@@ -104,8 +104,15 @@ type %USERPROFILE%\.token_alert.pid
 - **macOS Tahoe(26+) 필수**: `autosaveName` 없는 `NSStatusItem`은 기본값 숨김 → `setAutosaveName_("TokenAlert")`을 `@rumps.timer(0.1)`로 run loop 시작 후 설정 (`_nsapp.nsstatusitem`은 `app.run()` 이후에만 접근 가능)
 - 설치 시 `defaults write com.apple.controlcenter "NSStatusItem Visible TokenAlert" -bool true` 필수 — 미실행 시 아이콘이 맥 메뉴바에 나타나지 않음
 - py2app으로 번들링: `platform/macos/setup_tray.py` 설정 파일, 출력은 `dist/TokenAlertTray.app`; `CFBundleName`이 바이너리 이름 결정
+- 빌드 전 venv에 rumps 설치 필수: `.venv/bin/pip install rumps` (미설치 시 `ImportError: No module named 'rumps'`로 빌드 실패)
 - 빌드 명령: `.venv/bin/python platform/macos/setup_tray.py py2app` (소스 디렉터리에서 실행; py2app은 venv에 설치됨)
-- 번들 후 애드혹 서명 필요: `codesign --force --deep --sign - ~/Applications/TokenAlertTray.app`
+- 번들 후 애드혹 서명: Python.framework 포함 번들에서 `--deep`은 "bundle format is ambiguous" 오류 발생 → 순서대로 서명 필요:
+  ```bash
+  codesign --force --sign - ~/Applications/TokenAlertTray.app/Contents/Frameworks/Python.framework/Versions/Current/Python
+  codesign --force --sign - ~/Applications/TokenAlertTray.app/Contents/Frameworks/Python.framework/Versions/Current
+  codesign --force --sign - ~/Applications/TokenAlertTray.app
+  ```
+  `codesign --verify`는 Python.framework 번들 구조 특성상 여전히 경고 출력할 수 있음 — 로컬 실행에는 문제 없음
 - LaunchAgent plist에 `LimitLoadToSessionType = Aqua` 필요 — GUI/메뉴바 앱은 Aqua 세션에서만 동작
 
 ### Windows 트레이 앱 (`platform/windows/tray.py`)

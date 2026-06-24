@@ -3,12 +3,13 @@
 token_alert — Claude Code 5시간 토큰 창 초기화 감지 데몬
 
 작동 방식:
-  1. ~/.claude/projects/**/*.jsonl 파일을 주기적으로 스캔
-  2. 현재 시각 기준으로 최근 5시간 이내 메시지 중 가장 오래된 것의 타임스탬프를 찾음
-  3. 그 타임스탬프 + 5시간 = 다음 초기화 시각 계산
-  4. 이전에 예약한 시각과 다를 경우 GitHub Actions workflow 를 dispatch 하여 알림 예약
-  5. 컴퓨터가 꺼지더라도 GitHub Actions 가 클라우드에서 대기 후 텔레그램 알림 전송
-  6. 텔레그램 /status 명령으로 다음 초기화까지 남은 시간 즉시 조회 가능
+  1. ~/.claude/token_alert_usage.json 의 five_hour_resets_at(Unix timestamp)를 우선 읽음
+     (Claude Code가 서버 응답 기반으로 기록하는 실제 초기화 시각)
+  2. 해당 파일이 없거나 필드가 없으면 ~/.claude/projects/**/*.jsonl 폴백:
+     최근 5시간 이내 메시지 중 가장 오래된 타임스탬프 + 5시간으로 계산
+  3. 이전에 예약한 시각과 다를 경우 GitHub Actions workflow 를 dispatch 하여 알림 예약
+  4. 컴퓨터가 꺼지더라도 GitHub Actions 가 클라우드에서 대기 후 텔레그램 알림 전송
+  5. 텔레그램 /status 명령으로 다음 초기화까지 남은 시간 즉시 조회 가능
 """
 
 import json
@@ -32,6 +33,7 @@ DEFAULT_POLL_INTERVAL = 600               # 감지 주기 (초, 기본 10분)
 STATE_FILE = Path.home() / ".token_alert_state.json"
 PID_FILE = Path.home() / ".token_alert.pid"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
+USAGE_FILE = Path.home() / ".claude" / "token_alert_usage.json"
 
 
 def load_config() -> dict:
@@ -105,7 +107,27 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
 
 
 # ──────────────────────────────────────────
-# Claude Code jsonl 파싱
+# Claude Code 초기화 시각 읽기
+# ──────────────────────────────────────────
+def read_reset_time_from_usage_file() -> datetime | None:
+    """~/.claude/token_alert_usage.json 에서 five_hour_resets_at(Unix timestamp)를 읽어 반환.
+
+    Claude Code가 서버 응답 기반으로 기록하는 실제 초기화 시각.
+    파일 없거나 필드 없으면 None 반환 → jsonl 폴백.
+    """
+    try:
+        with open(USAGE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        ts = data.get("five_hour_resets_at")
+        if ts is None:
+            return None
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+
+
+# ──────────────────────────────────────────
+# Claude Code jsonl 파싱 (폴백)
 # ──────────────────────────────────────────
 def get_claude_projects_dir(cfg: dict) -> Path:
     """Claude Code 프로젝트 디렉터리 경로를 반환합니다."""
@@ -487,26 +509,31 @@ def handle_telegram_command(cfg: dict, update: dict, logger: logging.Logger, dry
     if command == "/status":
         KST = timezone(timedelta(hours=9))
         now = datetime.now(timezone.utc)
-        state = load_state()
-        scheduled = state.get("scheduled_reset_time")
 
-        if scheduled:
-            try:
-                reset_dt = datetime.fromisoformat(scheduled)
-                remaining = reset_dt - now
-                secs = int(remaining.total_seconds())
-                if secs > 0:
-                    hours, rem = divmod(secs, 3600)
-                    minutes = rem // 60
-                    reset_kst = reset_dt.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
-                    if hours > 0:
-                        time_str = f"{hours}시간 {minutes}분"
-                    else:
-                        time_str = f"{minutes}분"
-                    reply = f"⏳ 다음 초기화까지 {time_str} 남았습니다.\n예정 시각: {reset_kst}"
+        # usage 파일 우선 (서버 응답 기반 실제 초기화 시각), 없으면 state 파일 폴백
+        reset_dt = read_reset_time_from_usage_file()
+        if reset_dt is None:
+            state = load_state()
+            scheduled = state.get("scheduled_reset_time")
+            if scheduled:
+                try:
+                    reset_dt = datetime.fromisoformat(scheduled)
+                except ValueError:
+                    reset_dt = None
+
+        if reset_dt is not None:
+            remaining = reset_dt - now
+            secs = int(remaining.total_seconds())
+            if secs > 0:
+                hours, rem = divmod(secs, 3600)
+                minutes = rem // 60
+                reset_kst = reset_dt.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
+                if hours > 0:
+                    time_str = f"{hours}시간 {minutes}분"
                 else:
-                    reply = "✅ 현재 예약된 초기화 알림이 없습니다.\n(Claude Code를 사용하면 자동으로 감지됩니다)"
-            except ValueError:
+                    time_str = f"{minutes}분"
+                reply = f"⏳ 다음 초기화까지 {time_str} 남았습니다.\n예정 시각: {reset_kst}"
+            else:
                 reply = "✅ 현재 예약된 초기화 알림이 없습니다.\n(Claude Code를 사용하면 자동으로 감지됩니다)"
         else:
             reply = "✅ 현재 예약된 초기화 알림이 없습니다.\n(Claude Code를 사용하면 자동으로 감지됩니다)"
@@ -543,19 +570,22 @@ def run_telegram_polling(cfg: dict, logger: logging.Logger, dry_run: bool = Fals
 # ──────────────────────────────────────────
 def run_once(cfg: dict, logger: logging.Logger, dry_run: bool = False) -> None:
     """한 번의 감지 주기를 실행합니다."""
-    projects_dir = get_claude_projects_dir(cfg)
-
-    if not projects_dir.exists():
-        logger.warning(f"Claude Code 프로젝트 디렉터리를 찾을 수 없습니다: {projects_dir}")
-        return
-
-    oldest_ts = find_oldest_message_in_window(projects_dir)
-
-    if oldest_ts is None:
-        logger.debug("최근 5시간 내 메시지 없음 — 알림 예약 불필요")
-        return
-
-    reset_time = calculate_reset_time(oldest_ts)
+    # usage 파일 우선 (서버 응답 기반 실제 초기화 시각)
+    reset_time = read_reset_time_from_usage_file()
+    if reset_time is not None:
+        logger.debug(f"usage 파일에서 초기화 시각 읽음: {reset_time.isoformat()}")
+    else:
+        # 폴백: jsonl에서 가장 오래된 메시지 타임스탬프 + 5h
+        projects_dir = get_claude_projects_dir(cfg)
+        if not projects_dir.exists():
+            logger.warning(f"Claude Code 프로젝트 디렉터리를 찾을 수 없습니다: {projects_dir}")
+            return
+        oldest_ts = find_oldest_message_in_window(projects_dir)
+        if oldest_ts is None:
+            logger.debug("최근 5시간 내 메시지 없음 — 알림 예약 불필요")
+            return
+        reset_time = calculate_reset_time(oldest_ts)
+        logger.debug(f"jsonl 폴백으로 초기화 시각 계산: {reset_time.isoformat()}")
     now = datetime.now(timezone.utc)
 
     # 이미 지났거나 너무 임박한 초기화 시각은 무시 (GitHub Actions 지연 고려, 최소 5분)
