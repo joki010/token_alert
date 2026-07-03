@@ -7,6 +7,7 @@ rumps 기반
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import rumps
@@ -22,6 +23,9 @@ SCRIPT_ROOT = Path(__file__).parent.parent.parent.resolve()
 TRAY_LOCK = Path("/tmp/token_alert_tray.pid")
 LABEL = "com.token-alert.watcher"
 PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+TRAY_LABEL = "com.token-alert.tray"
+TRAY_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{TRAY_LABEL}.plist"
+TRAY_PLIST_DISABLED = TRAY_PLIST.with_suffix(".plist.disabled")
 ICON = RESOURCES / "claudecode-tray.png"
 ICON_INACTIVE = RESOURCES / "claudecode-tray-inactive.png"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
@@ -38,12 +42,45 @@ def is_watcher_running() -> bool:
     return '"PID"' in result.stdout
 
 
-def watcher_start() -> None:
+def watcher_start() -> bool:
+    # ponytail: launchctl load/unload는 실패해도 exit code 0을 반환하는 경우가 있어
+    # returncode로는 성공 여부를 신뢰할 수 없음 — 실제 상태를 다시 조회해 판정.
+    # exec 실패로 즉시 죽는 프로세스의 PID가 launchctl list에 잠깐 남는 걸 피하려 0.5초 대기 후 확인.
     subprocess.run(["launchctl", "load", str(PLIST)], capture_output=True)
+    time.sleep(0.5)
+    return is_watcher_running()
 
 
-def watcher_stop() -> None:
+def watcher_stop() -> bool:
     subprocess.run(["launchctl", "unload", str(PLIST)], capture_output=True)
+    time.sleep(0.5)
+    return not is_watcher_running()
+
+
+def current_tray_plist_path() -> Path:
+    """quit_app의 self-unload 등에서 쓸, 지금 실제로 존재하는 tray plist 경로.
+    로그인 시작이 꺼진 상태(파일이 .disabled로 rename됨)면 그쪽을 반환."""
+    return TRAY_PLIST if TRAY_PLIST.exists() else TRAY_PLIST_DISABLED
+
+
+def is_login_item_enabled() -> bool:
+    return TRAY_PLIST.exists()
+
+
+def set_login_item_enabled(enabled: bool) -> bool:
+    # ponytail: 파일 존재 여부로 로그인 시작을 켜고 끔 — launchd는 로그인 시
+    # ~/Library/LaunchAgents를 스캔하므로, 파일을 rename해두면 지금 실행 중인
+    # 트레이는 그대로 두고 '다음 로그인'부터만 자동시작 여부가 바뀐다.
+    try:
+        if enabled:
+            if TRAY_PLIST_DISABLED.exists():
+                TRAY_PLIST_DISABLED.rename(TRAY_PLIST)
+        else:
+            if TRAY_PLIST.exists():
+                TRAY_PLIST.rename(TRAY_PLIST_DISABLED)
+        return True
+    except OSError:
+        return False
 
 
 class TokenAlertApp(rumps.App):
@@ -56,15 +93,20 @@ class TokenAlertApp(rumps.App):
         self.status_item = rumps.MenuItem("확인 중...")
         self.status_item.set_callback(None)
         self.toggle_item = rumps.MenuItem("감시 중지", callback=self.toggle_watcher)
+        self.login_item = rumps.MenuItem("맥 시작시 실행", callback=self.toggle_login_item)
+        self.login_item.state = is_login_item_enabled()
 
         self.menu = [
             self.status_item,
             None,
             self.toggle_item,
             rumps.MenuItem("로그 열기", callback=self.open_log),
+            self.login_item,
             None,
             rumps.MenuItem("종료", callback=self.quit_app),
         ]
+        self._user_stopped = False
+        self._was_running = None
         self._refresh_status()
 
     def _set_autosave_name(self):
@@ -89,6 +131,13 @@ class TokenAlertApp(rumps.App):
             self.icon = str(ICON_INACTIVE) if ICON_INACTIVE.exists() else None
             self.status_item.title = "○ 감시 중지됨"
             self.toggle_item.title = "감시 재시작"
+            if self._was_running and not self._user_stopped:
+                rumps.notification(
+                    "token_alert", "감시 중지됨",
+                    "watcher가 예기치 않게 종료됐습니다. 메뉴에서 재시작하세요."
+                )
+            self._user_stopped = False
+        self._was_running = running
 
     @rumps.timer(UPDATE_INTERVAL)
     def update_status(self, _):
@@ -96,15 +145,30 @@ class TokenAlertApp(rumps.App):
 
     def toggle_watcher(self, _):
         if is_watcher_running():
-            watcher_stop()
+            self._user_stopped = True
+            ok = watcher_stop()
         else:
-            watcher_start()
+            ok = watcher_start()
+        if not ok:
+            rumps.notification("token_alert", "명령 실패", "launchctl 실행에 실패했습니다.")
         self._refresh_status()
 
     def open_log(self, _):
         subprocess.run(["open", "-a", "Console", str(LOG_FILE)])
 
+    def toggle_login_item(self, _):
+        enabled = not is_login_item_enabled()
+        if set_login_item_enabled(enabled):
+            self.login_item.state = enabled
+        else:
+            rumps.notification("token_alert", "설정 실패", "로그인 시작 설정을 변경하지 못했습니다.")
+
     def quit_app(self, _):
+        if is_watcher_running():
+            if not watcher_stop():
+                rumps.notification("token_alert", "watcher 종료 실패", "launchctl unload에 실패했습니다. watcher가 계속 실행 중일 수 있습니다.")
+        # KeepAlive=true라 self unload 안 하면 launchd가 즉시 재기동시킴
+        subprocess.run(["launchctl", "unload", str(current_tray_plist_path())], capture_output=True)
         rumps.quit_application()
 
 
