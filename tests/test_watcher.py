@@ -3,6 +3,7 @@ import sys
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -175,8 +176,7 @@ class TestTelegramBotCommands(unittest.TestCase):
         }
 
     def test_status_with_future_reset_time(self):
-        """미래 초기화 시각이 있을 때 남은 시간을 포함한 응답을 전송해야 한다 (state 파일 폴백)."""
-        from datetime import datetime, timezone, timedelta
+        """state에 미래 예약이 있어도 실제 남은 시간처럼 응답하지 않아야 한다."""
         future = (datetime.now(timezone.utc) + timedelta(hours=1, minutes=23)).astimezone(
             timezone(timedelta(hours=9))
         ).strftime("%Y-%m-%dT%H:%M:%S+09:00")
@@ -184,18 +184,17 @@ class TestTelegramBotCommands(unittest.TestCase):
         state = {"scheduled_reset_time": future}
         sent = []
 
-        with patch.object(watcher, "read_reset_time_from_usage_file", return_value=None), \
+        with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus()), \
              patch.object(watcher, "load_state", return_value=state), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
 
         self.assertEqual(len(sent), 1)
-        self.assertIn("⏳", sent[0])
-        self.assertIn("남았습니다", sent[0])
+        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
+        self.assertNotIn("남았습니다", sent[0])
 
     def test_status_usage_file_takes_priority_over_state(self):
         """usage 파일 값이 있으면 state 파일보다 우선하여 응답해야 한다."""
-        from datetime import datetime, timezone, timedelta
         usage_reset = datetime.now(timezone.utc) + timedelta(hours=3)
         load_state_calls = []
 
@@ -204,7 +203,7 @@ class TestTelegramBotCommands(unittest.TestCase):
             return {"scheduled_reset_time": "2000-01-01T00:00:00+09:00"}
 
         sent = []
-        with patch.object(watcher, "read_reset_time_from_usage_file", return_value=usage_reset), \
+        with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus(five_hour_reset=usage_reset, source="cache")), \
              patch.object(watcher, "load_state", side_effect=fake_load_state), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
@@ -217,17 +216,16 @@ class TestTelegramBotCommands(unittest.TestCase):
         """예약된 시각이 없을 때 미예약 안내 메시지를 전송해야 한다."""
         sent = []
 
-        with patch.object(watcher, "read_reset_time_from_usage_file", return_value=None), \
+        with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus()), \
              patch.object(watcher, "load_state", return_value={}), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
 
         self.assertEqual(len(sent), 1)
-        self.assertIn("✅", sent[0])
+        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
 
     def test_status_with_past_reset_time(self):
-        """초기화 시각이 이미 지났으면 미예약 안내 메시지를 전송해야 한다."""
-        from datetime import datetime, timezone, timedelta
+        """과거 state 예약도 실제 초기화 시각처럼 응답하지 않아야 한다."""
         past = (datetime.now(timezone.utc) - timedelta(minutes=5)).astimezone(
             timezone(timedelta(hours=9))
         ).strftime("%Y-%m-%dT%H:%M:%S+09:00")
@@ -235,13 +233,13 @@ class TestTelegramBotCommands(unittest.TestCase):
         state = {"scheduled_reset_time": past}
         sent = []
 
-        with patch.object(watcher, "read_reset_time_from_usage_file", return_value=None), \
+        with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus()), \
              patch.object(watcher, "load_state", return_value=state), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
 
         self.assertEqual(len(sent), 1)
-        self.assertIn("✅", sent[0])
+        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
 
     def test_unknown_command_sends_help(self):
         """/status 외 명령에는 사용법 안내를 전송해야 한다."""
@@ -278,6 +276,216 @@ class TestTelegramBotCommands(unittest.TestCase):
             )
 
         mock_open.assert_not_called()
+
+
+class TestUsageCacheStatus(unittest.TestCase):
+
+    def _cfg(self):
+        return {"CLAUDE_PROJECTS_DIR": str(Path(tempfile.gettempdir()) / "missing-token-alert-projects")}
+
+    def _make_logger(self):
+        import logging
+        return logging.getLogger("test")
+
+    def _write_usage(self, path: Path, data: dict) -> None:
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_reads_nested_rate_limits_five_hour_reset(self):
+        """rate_limits.five_hour.resets_at 형태의 cache를 읽어야 한다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage.json"
+            future = datetime.now(timezone.utc) + timedelta(hours=2)
+            self._write_usage(usage_path, {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "rate_limits": {"five_hour": {"resets_at": future.timestamp()}},
+            })
+
+            with patch.object(watcher, "USAGE_FILE", usage_path):
+                result = watcher.read_reset_time_from_usage_file()
+
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result.timestamp(), future.timestamp(), delta=1)
+
+    def test_ignores_past_reset_or_stale_updated_at(self):
+        """과거 reset 시각이나 오래된 updated_at을 가진 cache는 무시해야 한다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage.json"
+            past = datetime.now(timezone.utc) - timedelta(minutes=1)
+            stale_future = datetime.now(timezone.utc) + timedelta(hours=2)
+
+            self._write_usage(usage_path, {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "five_hour_resets_at": past.timestamp(),
+            })
+            with patch.object(watcher, "USAGE_FILE", usage_path):
+                self.assertIsNone(watcher.read_reset_time_from_usage_file())
+
+            self._write_usage(usage_path, {
+                "updated_at": (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat(),
+                "five_hour_resets_at": stale_future.timestamp(),
+            })
+            with patch.object(watcher, "USAGE_FILE", usage_path):
+                self.assertIsNone(watcher.read_reset_time_from_usage_file())
+
+    def test_status_ignores_state_scheduled_reset_without_cache(self):
+        """usage cache가 없고 state에 미래 scheduled_reset_time이 있어도 남은 시간 표시 금지."""
+        sent = []
+        state = {"scheduled_reset_time": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()}
+
+        with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus()), \
+             patch.object(watcher, "load_state", return_value=state), \
+             patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+            watcher.handle_telegram_command(
+                {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"},
+                {"message": {"text": "/status", "chat": {"id": 1}}},
+                self._make_logger(),
+            )
+
+        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
+        self.assertNotIn("예정 시각:", sent[0])
+
+    def test_status_reads_usage_cache_from_temp_file_before_state(self):
+        """usage cache가 있으면 임시 파일 값이 state보다 우선해야 한다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage.json"
+            future = datetime.now(timezone.utc) + timedelta(hours=3)
+            self._write_usage(usage_path, {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "five_hour_resets_at": future.timestamp(),
+            })
+            sent = []
+
+            with patch.object(watcher, "USAGE_FILE", usage_path), \
+                 patch.object(watcher, "load_state", return_value={"scheduled_reset_time": "2000-01-01T00:00:00+09:00"}), \
+                 patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+                watcher.handle_telegram_command(
+                    {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"},
+                    {"message": {"text": "/status", "chat": {"id": 1}}},
+                    self._make_logger(),
+                )
+
+        self.assertIn("5시간 한도", sent[0])
+        self.assertIn("남았습니다", sent[0])
+
+    def test_status_reports_five_hour_and_seven_day_limits(self):
+        """5시간과 7일 한도 값이 함께 있으면 둘 다 응답해야 한다."""
+        now = datetime.now(timezone.utc)
+        status = watcher.LimitStatus(
+            five_hour_reset=now + timedelta(hours=1),
+            seven_day_reset=now + timedelta(days=2),
+            source="cache",
+        )
+        sent = []
+
+        with patch.object(watcher, "get_current_limit_status", return_value=status), \
+             patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+            watcher.handle_telegram_command(
+                {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"},
+                {"message": {"text": "/status", "chat": {"id": 1}}},
+                self._make_logger(),
+            )
+
+        self.assertIn("5시간 한도", sent[0])
+        self.assertIn("7일 한도", sent[0])
+
+    def test_jsonl_fallback_status_is_marked_estimated(self):
+        """JSONL 폴백을 쓰면 응답에 추정값임이 드러나야 한다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects_dir = Path(tmp)
+            log_path = projects_dir / "session.jsonl"
+            ts = datetime.now(timezone.utc) - timedelta(hours=1)
+            log_path.write_text(json.dumps({"timestamp": ts.isoformat()}) + "\n", encoding="utf-8")
+            sent = []
+
+            with patch.object(watcher, "USAGE_FILE", Path(tmp) / "missing.json"), \
+                 patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+                watcher.handle_telegram_command(
+                    {
+                        "TELEGRAM_BOT_TOKEN": "fake",
+                        "TELEGRAM_CHAT_ID": "1",
+                        "CLAUDE_PROJECTS_DIR": str(projects_dir),
+                    },
+                    {"message": {"text": "/status", "chat": {"id": 1}}},
+                    self._make_logger(),
+                )
+
+        self.assertIn("추정값", sent[0])
+
+    def test_status_ignores_state_after_dispatch_failure(self):
+        """dispatch 실패 뒤 stale state가 실제 초기화 시각처럼 표시되면 안 된다."""
+        sent = []
+        with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus()), \
+             patch.object(watcher, "load_state", return_value={"scheduled_reset_time": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}), \
+             patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+            watcher.handle_telegram_command(
+                {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"},
+                {"message": {"text": "/status", "chat": {"id": 1}}},
+                self._make_logger(),
+            )
+
+        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
+
+    def test_status_ignores_stale_state_after_near_reset_skip(self):
+        """초기화 5분 이하로 dispatch를 건너뛰어도 stale state 노출 금지."""
+        sent = []
+        with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus()), \
+             patch.object(watcher, "load_state", return_value={"scheduled_reset_time": (datetime.now(timezone.utc) + timedelta(minutes=4)).isoformat()}), \
+             patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+            watcher.handle_telegram_command(
+                {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"},
+                {"message": {"text": "/status", "chat": {"id": 1}}},
+                self._make_logger(),
+            )
+
+        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
+
+    def test_notify_advance_dispatch_sends_reset_and_notify_times(self):
+        """NOTIFY_ADVANCE_SECONDS가 있으면 workflow 입력에 두 시각을 분리해 전달해야 한다."""
+        reset_time = datetime(2026, 6, 24, 6, 30, tzinfo=timezone.utc)
+        cfg = {
+            "GITHUB_TOKEN": "fake-token",
+            "GITHUB_OWNER": "owner",
+            "GITHUB_REPO": "repo",
+            "NOTIFY_ADVANCE_SECONDS": "600",
+        }
+        dispatch_resp = MagicMock()
+        dispatch_resp.status = 204
+        dispatch_resp.__enter__ = lambda s: s
+        dispatch_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(watcher, "_get_pending_runs", return_value=[]), \
+             patch("urllib.request.urlopen", return_value=dispatch_resp) as mock_open:
+            ok = watcher.dispatch_github_workflow(cfg, reset_time, self._make_logger(), dry_run=False)
+
+        self.assertTrue(ok)
+        payload = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        self.assertEqual(payload["inputs"]["reset_time"], "2026-06-24T15:30:00+09:00")
+        self.assertEqual(payload["inputs"]["notify_time"], "2026-06-24T15:20:00+09:00")
+
+    def test_status_line_writer_saves_flat_and_nested_fields(self):
+        """statusLine writer가 호환 필드와 rate_limits 원본 필드를 함께 저장해야 한다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            usage_path = Path(tmp) / "usage.json"
+            future = datetime.now(timezone.utc) + timedelta(hours=2)
+            seven = datetime.now(timezone.utc) + timedelta(days=3)
+
+            watcher.write_usage_cache_from_status_line(
+                {
+                    "rate_limits": {
+                        "five_hour": {"resets_at": future.timestamp(), "used_percentage": 91},
+                        "seven_day": {"resets_at": seven.timestamp(), "used_percentage": 42},
+                    }
+                },
+                usage_path,
+            )
+
+            data = json.loads(usage_path.read_text(encoding="utf-8"))
+
+        self.assertAlmostEqual(data["five_hour_resets_at"], future.timestamp(), delta=1)
+        self.assertAlmostEqual(data["seven_day_resets_at"], seven.timestamp(), delta=1)
+        self.assertEqual(data["five_hour_used_percentage"], 91)
+        self.assertEqual(data["seven_day_used_percentage"], 42)
+        self.assertIn("updated_at", data)
 
 
 if __name__ == "__main__":

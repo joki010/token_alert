@@ -22,6 +22,7 @@ import argparse
 import threading
 import urllib.request
 import urllib.error
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -34,6 +35,17 @@ STATE_FILE = Path.home() / ".token_alert_state.json"
 PID_FILE = Path.home() / ".token_alert.pid"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
 USAGE_FILE = Path.home() / ".claude" / "token_alert_usage.json"
+USAGE_CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
+
+
+@dataclass(frozen=True)
+class LimitStatus:
+    five_hour_reset: datetime | None = None
+    seven_day_reset: datetime | None = None
+    five_hour_used_percentage: float | None = None
+    seven_day_used_percentage: float | None = None
+    source: str | None = None
+    estimated: bool = False
 
 
 def load_config() -> dict:
@@ -109,21 +121,142 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
 # ──────────────────────────────────────────
 # Claude Code 초기화 시각 읽기
 # ──────────────────────────────────────────
-def read_reset_time_from_usage_file() -> datetime | None:
-    """~/.claude/token_alert_usage.json 에서 five_hour_resets_at(Unix timestamp)를 읽어 반환.
+def _parse_reset_datetime(value) -> datetime | None:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.replace(".", "", 1).isdigit():
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (ValueError, TypeError, OSError):
+        return None
 
-    Claude Code가 서버 응답 기반으로 기록하는 실제 초기화 시각.
-    파일 없거나 필드 없으면 None 반환 → jsonl 폴백.
-    """
+
+def _future_datetime(value, now: datetime) -> datetime | None:
+    parsed = _parse_reset_datetime(value)
+    if parsed is None or parsed <= now:
+        return None
+    return parsed
+
+
+def _usage_limit(data: dict, window: str) -> dict:
+    rate_limits = data.get("rate_limits")
+    if not isinstance(rate_limits, dict):
+        return {}
+    limit = rate_limits.get(window)
+    if not isinstance(limit, dict):
+        return {}
+    return limit
+
+
+def _usage_cache_is_fresh(data: dict, now: datetime) -> bool:
+    updated_raw = data.get("updated_at")
+    if updated_raw is None:
+        return True
+    updated_at = _parse_reset_datetime(updated_raw)
+    if updated_at is None:
+        return False
+    return (now - updated_at).total_seconds() <= USAGE_CACHE_MAX_AGE_SECONDS
+
+
+def _usage_used_percentage(data: dict, window: str) -> float | None:
+    flat_key = f"{window}_used_percentage"
+    value = data.get(flat_key)
+    if value is None:
+        value = _usage_limit(data, window).get("used_percentage")
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def read_limit_status_from_usage_file() -> LimitStatus:
     try:
         with open(USAGE_FILE, encoding="utf-8") as f:
             data = json.load(f)
-        ts = data.get("five_hour_resets_at")
-        if ts is None:
-            return None
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc)
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
-        return None
+        return LimitStatus()
+
+    now = datetime.now(timezone.utc)
+    if not _usage_cache_is_fresh(data, now):
+        return LimitStatus()
+
+    five_hour_limit = _usage_limit(data, "five_hour")
+    seven_day_limit = _usage_limit(data, "seven_day")
+    five_hour_reset = _future_datetime(
+        data.get("five_hour_resets_at", five_hour_limit.get("resets_at")),
+        now,
+    )
+    seven_day_reset = _future_datetime(
+        data.get("seven_day_resets_at", seven_day_limit.get("resets_at")),
+        now,
+    )
+
+    if five_hour_reset is None and seven_day_reset is None:
+        return LimitStatus()
+
+    return LimitStatus(
+        five_hour_reset=five_hour_reset,
+        seven_day_reset=seven_day_reset,
+        five_hour_used_percentage=_usage_used_percentage(data, "five_hour"),
+        seven_day_used_percentage=_usage_used_percentage(data, "seven_day"),
+        source="cache",
+    )
+
+
+def read_reset_time_from_usage_file() -> datetime | None:
+    """~/.claude/token_alert_usage.json 에서 5시간 한도 초기화 시각을 읽어 반환."""
+    return read_limit_status_from_usage_file().five_hour_reset
+
+
+def get_current_limit_status(cfg: dict) -> LimitStatus:
+    cache_status = read_limit_status_from_usage_file()
+    if cache_status.five_hour_reset is not None or cache_status.seven_day_reset is not None:
+        return cache_status
+
+    projects_dir = get_claude_projects_dir(cfg)
+    if not projects_dir.exists():
+        return LimitStatus()
+    oldest_ts = find_oldest_message_in_window(projects_dir)
+    if oldest_ts is None:
+        return LimitStatus()
+
+    return LimitStatus(
+        five_hour_reset=calculate_reset_time(oldest_ts),
+        source="jsonl",
+        estimated=True,
+    )
+
+
+def write_usage_cache_from_status_line(status_line: dict, usage_file: Path = USAGE_FILE) -> None:
+    rate_limits = status_line.get("rate_limits")
+    if not isinstance(rate_limits, dict):
+        return
+
+    five_hour = _usage_limit(status_line, "five_hour")
+    seven_day = _usage_limit(status_line, "seven_day")
+    data = {
+        "rate_limits": rate_limits,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if "resets_at" in five_hour:
+        data["five_hour_resets_at"] = five_hour["resets_at"]
+    if "resets_at" in seven_day:
+        data["seven_day_resets_at"] = seven_day["resets_at"]
+    if "used_percentage" in five_hour:
+        data["five_hour_used_percentage"] = five_hour["used_percentage"]
+    if "used_percentage" in seven_day:
+        data["seven_day_used_percentage"] = seven_day["used_percentage"]
+
+    usage_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(usage_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
 
 # ──────────────────────────────────────────
@@ -357,6 +490,9 @@ def dispatch_github_workflow(
 
     KST = timezone(timedelta(hours=9))
     reset_iso = reset_time.astimezone(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+    advance = int(cfg.get("NOTIFY_ADVANCE_SECONDS", "0"))
+    notify_time = reset_time - timedelta(seconds=advance)
+    notify_iso = notify_time.astimezone(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
     url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/token-reset-notify.yml/dispatches"
 
     payload = json.dumps(
@@ -364,6 +500,7 @@ def dispatch_github_workflow(
             "ref": "main",
             "inputs": {
                 "reset_time": reset_iso,
+                "notify_time": notify_iso,
             },
         }
     ).encode("utf-8")
@@ -462,6 +599,36 @@ def get_telegram_updates(cfg: dict, offset: int, logger: logging.Logger) -> list
     return []
 
 
+def _format_remaining(reset_dt: datetime, now: datetime) -> str:
+    secs = int((reset_dt - now).total_seconds())
+    hours, rem = divmod(max(secs, 0), 3600)
+    minutes = rem // 60
+    if hours > 0:
+        return f"{hours}시간 {minutes}분"
+    return f"{minutes}분"
+
+
+def _status_line(label: str, reset_dt: datetime, now: datetime, used_percentage: float | None) -> str:
+    KST = timezone(timedelta(hours=9))
+    reset_kst = reset_dt.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
+    usage = "" if used_percentage is None else f" (사용량 {used_percentage:g}%)"
+    return f"{label}{usage}: {_format_remaining(reset_dt, now)} 남았습니다\n예정 시각: {reset_kst}"
+
+
+def format_limit_status_reply(status: LimitStatus) -> str:
+    now = datetime.now(timezone.utc)
+    lines = []
+    if status.five_hour_reset is not None:
+        lines.append(_status_line("5시간 한도", status.five_hour_reset, now, status.five_hour_used_percentage))
+    if status.seven_day_reset is not None:
+        lines.append(_status_line("7일 한도", status.seven_day_reset, now, status.seven_day_used_percentage))
+    if not lines:
+        return "아직 Claude Code 한도 값을 받은 적이 없습니다.\nClaude Code statusLine을 한 번 실행하면 정확한 값이 표시됩니다."
+    prefix = "⏳ 다음 초기화까지"
+    suffix = "\n\n(JSONL 로그 기반 추정값)" if status.estimated else ""
+    return f"{prefix}\n" + "\n".join(lines) + suffix
+
+
 def handle_telegram_command(cfg: dict, update: dict, logger: logging.Logger, dry_run: bool = False) -> None:
     """텔레그램 update를 처리하고 명령에 맞는 응답을 전송한다."""
     message = update.get("message", {})
@@ -479,36 +646,7 @@ def handle_telegram_command(cfg: dict, update: dict, logger: logging.Logger, dry
     command = text.split()[0].split("@")[0].lower()
 
     if command == "/status":
-        KST = timezone(timedelta(hours=9))
-        now = datetime.now(timezone.utc)
-
-        # usage 파일 우선 (서버 응답 기반 실제 초기화 시각), 없으면 state 파일 폴백
-        reset_dt = read_reset_time_from_usage_file()
-        if reset_dt is None:
-            state = load_state()
-            scheduled = state.get("scheduled_reset_time")
-            if scheduled:
-                try:
-                    reset_dt = datetime.fromisoformat(scheduled)
-                except ValueError:
-                    reset_dt = None
-
-        if reset_dt is not None:
-            remaining = reset_dt - now
-            secs = int(remaining.total_seconds())
-            if secs > 0:
-                hours, rem = divmod(secs, 3600)
-                minutes = rem // 60
-                reset_kst = reset_dt.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
-                if hours > 0:
-                    time_str = f"{hours}시간 {minutes}분"
-                else:
-                    time_str = f"{minutes}분"
-                reply = f"⏳ 다음 초기화까지 {time_str} 남았습니다.\n예정 시각: {reset_kst}"
-            else:
-                reply = "✅ 현재 예약된 초기화 알림이 없습니다.\n(Claude Code를 사용하면 자동으로 감지됩니다)"
-        else:
-            reply = "✅ 현재 예약된 초기화 알림이 없습니다.\n(Claude Code를 사용하면 자동으로 감지됩니다)"
+        reply = format_limit_status_reply(get_current_limit_status(cfg))
 
         logger.info(f"[BOT] /status 응답: {reply[:60]}")
         send_telegram_message(cfg, reply, logger, dry_run=dry_run)
@@ -542,22 +680,12 @@ def run_telegram_polling(cfg: dict, logger: logging.Logger, dry_run: bool = Fals
 # ──────────────────────────────────────────
 def run_once(cfg: dict, logger: logging.Logger, dry_run: bool = False) -> None:
     """한 번의 감지 주기를 실행합니다."""
-    # usage 파일 우선 (서버 응답 기반 실제 초기화 시각)
-    reset_time = read_reset_time_from_usage_file()
-    if reset_time is not None:
-        logger.debug(f"usage 파일에서 초기화 시각 읽음: {reset_time.isoformat()}")
-    else:
-        # 폴백: jsonl에서 가장 오래된 메시지 타임스탬프 + 5h
-        projects_dir = get_claude_projects_dir(cfg)
-        if not projects_dir.exists():
-            logger.warning(f"Claude Code 프로젝트 디렉터리를 찾을 수 없습니다: {projects_dir}")
-            return
-        oldest_ts = find_oldest_message_in_window(projects_dir)
-        if oldest_ts is None:
-            logger.debug("최근 5시간 내 메시지 없음 — 알림 예약 불필요")
-            return
-        reset_time = calculate_reset_time(oldest_ts)
-        logger.debug(f"jsonl 폴백으로 초기화 시각 계산: {reset_time.isoformat()}")
+    status = get_current_limit_status(cfg)
+    reset_time = status.five_hour_reset
+    if reset_time is None:
+        logger.debug("초기화 시각 없음 — 알림 예약 불필요")
+        return
+    logger.debug(f"{status.source}에서 초기화 시각 읽음: {reset_time.isoformat()}")
     now = datetime.now(timezone.utc)
 
     # 이미 지났거나 너무 임박한 초기화 시각은 무시 (GitHub Actions 지연 고려, 최소 5분)
@@ -590,8 +718,6 @@ def run_once(cfg: dict, logger: logging.Logger, dry_run: bool = False) -> None:
         logger.debug(f"이미 예약됨: {reset_iso} — 중복 dispatch 건너뜀")
         return
 
-    advance = int(cfg.get("NOTIFY_ADVANCE_SECONDS", "0"))
-    notify_time = reset_time - timedelta(seconds=advance)
     remaining = reset_time - now
 
     logger.info(
@@ -599,7 +725,7 @@ def run_once(cfg: dict, logger: logging.Logger, dry_run: bool = False) -> None:
         f"(약 {int(remaining.total_seconds() // 60)}분 후)"
     )
 
-    ok = dispatch_github_workflow(cfg, notify_time, logger, dry_run=dry_run)
+    ok = dispatch_github_workflow(cfg, reset_time, logger, dry_run=dry_run)
 
     if ok:
         state["scheduled_reset_time"] = reset_iso
@@ -615,10 +741,19 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="실제 dispatch 없이 테스트 실행")
     parser.add_argument("--once", action="store_true", help="한 번만 실행 후 종료 (데몬 없이)")
     parser.add_argument("--verbose", action="store_true", help="상세 로그 출력")
+    parser.add_argument("--write-status-line", action="store_true", help="stdin의 statusLine JSON을 usage cache로 저장")
     args = parser.parse_args()
 
     logger = setup_logging(verbose=args.verbose)
     cfg = load_config()
+
+    if args.write_status_line:
+        try:
+            write_usage_cache_from_status_line(json.load(sys.stdin))
+        except json.JSONDecodeError as exc:
+            logger.error(f"statusLine JSON 파싱 실패: {exc}")
+            sys.exit(1)
+        return
 
     if not acquire_pid_lock(PID_FILE, logger):
         sys.exit(1)

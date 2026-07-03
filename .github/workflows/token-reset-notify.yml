@@ -9,6 +9,10 @@ on:
         description: "초기화 예정 시각 (KST, 예: 2026-01-01T21:00:00+09:00)"
         required: true
         type: string
+      notify_time:
+        description: "알림 전송 시각 (KST, 예: 2026-01-01T20:50:00+09:00)"
+        required: false
+        type: string
 
 concurrency:
   group: token-reset-notify
@@ -27,20 +31,22 @@ jobs:
         id: wait
         env:
           RESET_TIME: ${{ inputs.reset_time }}
+          NOTIFY_TIME: ${{ inputs.notify_time || inputs.reset_time }}
         run: |
           # UTC 현재 시각
           NOW=$(date -u +%s)
 
           # 목표 시각을 epoch 초로 변환 (KST +09:00 포함 ISO 8601)
-          TARGET=$(date -d "$RESET_TIME" +%s 2>/dev/null || echo "0")
+          TARGET=$(date -d "$NOTIFY_TIME" +%s 2>/dev/null || echo "0")
 
           if [ "$TARGET" = "0" ]; then
-            echo "⚠️  시각 파싱 실패: $RESET_TIME"
+            echo "⚠️  시각 파싱 실패: $NOTIFY_TIME"
             exit 1
           fi
 
           DIFF=$((TARGET - NOW))
           echo "reset_time=$RESET_TIME" >> $GITHUB_OUTPUT
+          echo "notify_time=$NOTIFY_TIME" >> $GITHUB_OUTPUT
 
           if [ "$DIFF" -le 0 ]; then
             echo "✅ 이미 초기화 시각이 지났거나 현재 시각입니다. 즉시 알림 전송."
@@ -55,14 +61,17 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RESET_TIME: ${{ inputs.reset_time }}
+          NOTIFY_TIME: ${{ inputs.notify_time || inputs.reset_time }}
         run: |
           # KST 표시 (입력값이 이미 +09:00 기준)
           RESET_KST=$(TZ=Asia/Seoul date -d "$RESET_TIME" "+%Y-%m-%d %H:%M KST" 2>/dev/null || echo "$RESET_TIME")
 
-          MESSAGE="🔄 <b>Claude Code 토큰 초기화 완료</b>
+          NOTIFY_KST=$(TZ=Asia/Seoul date -d "$NOTIFY_TIME" "+%Y-%m-%d %H:%M KST" 2>/dev/null || echo "$NOTIFY_TIME")
+
+          MESSAGE="🔄 <b>Claude Code 토큰 초기화 알림</b>
 
           초기화 시각: <code>${RESET_KST}</code>
-          이제 토큰이 새로 충전되었습니다. Claude Code를 다시 사용할 수 있습니다! ✨
+          알림 시각: <code>${NOTIFY_KST}</code>
 
           <i>token_alert by GitHub Actions</i>"
 
@@ -89,4 +98,5 @@ jobs:
         run: |
           echo "### 알림 결과" >> $GITHUB_STEP_SUMMARY
           echo "- 초기화 시각: \`${{ inputs.reset_time }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- 알림 시각: \`${{ inputs.notify_time || inputs.reset_time }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- 실행 완료: $(date -u '+%Y-%m-%d %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
