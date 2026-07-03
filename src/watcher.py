@@ -562,7 +562,7 @@ def send_telegram_message(cfg: dict, text: str, logger: logging.Logger, dry_run:
         logger.warning("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 미설정 — 전송 건너뜀")
         return
 
-    payload = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+    payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode("utf-8")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage",
         data=payload,
@@ -601,32 +601,53 @@ def get_telegram_updates(cfg: dict, offset: int, logger: logging.Logger) -> list
 
 def _format_remaining(reset_dt: datetime, now: datetime) -> str:
     secs = int((reset_dt - now).total_seconds())
-    hours, rem = divmod(max(secs, 0), 3600)
-    minutes = rem // 60
-    if hours > 0:
+    secs = max(secs, 0)
+    if secs >= 86400:
+        days, rem = divmod(secs, 86400)
+        hours = rem // 3600
+        return f"{days}일 {hours}시간" if hours > 0 else f"{days}일"
+    elif secs >= 3600:
+        hours, rem = divmod(secs, 3600)
+        minutes = rem // 60
         return f"{hours}시간 {minutes}분"
-    return f"{minutes}분"
-
-
-def _status_line(label: str, reset_dt: datetime, now: datetime, used_percentage: float | None) -> str:
-    KST = timezone(timedelta(hours=9))
-    reset_kst = reset_dt.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
-    usage = "" if used_percentage is None else f" (사용량 {used_percentage:g}%)"
-    return f"{label}{usage}: {_format_remaining(reset_dt, now)} 남았습니다\n예정 시각: {reset_kst}"
+    else:
+        minutes = secs // 60
+        return f"{minutes}분"
 
 
 def format_limit_status_reply(status: LimitStatus) -> str:
     now = datetime.now(timezone.utc)
+    KST = timezone(timedelta(hours=9))
     lines = []
+
     if status.five_hour_reset is not None:
-        lines.append(_status_line("5시간 한도", status.five_hour_reset, now, status.five_hour_used_percentage))
+        reset_kst = status.five_hour_reset.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
+        usage_val = status.five_hour_used_percentage
+        usage = "" if usage_val is None else f"\n• 사용 비율: {usage_val:g}%"
+        lines.append(
+            f"⚡ <b>5시간 단기 한도</b>\n"
+            f"• 남은 시간: <b>{_format_remaining(status.five_hour_reset, now)}</b>"
+            f"{usage}\n"
+            f"• 초기화 시각: <code>{reset_kst}</code>"
+        )
+
     if status.seven_day_reset is not None:
-        lines.append(_status_line("7일 한도", status.seven_day_reset, now, status.seven_day_used_percentage))
+        reset_kst = status.seven_day_reset.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
+        usage_val = status.seven_day_used_percentage
+        usage = "" if usage_val is None else f"\n• 사용 비율: {usage_val:g}%"
+        lines.append(
+            f"📅 <b>7일 장기 한도</b>\n"
+            f"• 남은 시간: <b>{_format_remaining(status.seven_day_reset, now)}</b>"
+            f"{usage}\n"
+            f"• 초기화 시각: <code>{reset_kst}</code>"
+        )
+
     if not lines:
         return "아직 Claude Code 한도 값을 받은 적이 없습니다.\nClaude Code statusLine을 한 번 실행하면 정확한 값이 표시됩니다."
-    prefix = "⏳ 다음 초기화까지"
+
+    prefix = "⏳ <b>Claude Code 토큰 한도 현황</b>\n──────────────────"
     suffix = "\n\n(JSONL 로그 기반 추정값)" if status.estimated else ""
-    return f"{prefix}\n" + "\n".join(lines) + suffix
+    return f"{prefix}\n" + "\n\n".join(lines) + "\n──────────────────" + suffix
 
 
 def handle_telegram_command(cfg: dict, update: dict, logger: logging.Logger, dry_run: bool = False) -> None:

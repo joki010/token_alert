@@ -364,8 +364,8 @@ class TestUsageCacheStatus(unittest.TestCase):
                     self._make_logger(),
                 )
 
-        self.assertIn("5시간 한도", sent[0])
-        self.assertIn("남았습니다", sent[0])
+        self.assertIn("5시간 단기 한도", sent[0])
+        self.assertIn("남은 시간", sent[0])
 
     def test_status_reports_five_hour_and_seven_day_limits(self):
         """5시간과 7일 한도 값이 함께 있으면 둘 다 응답해야 한다."""
@@ -385,8 +385,8 @@ class TestUsageCacheStatus(unittest.TestCase):
                 self._make_logger(),
             )
 
-        self.assertIn("5시간 한도", sent[0])
-        self.assertIn("7일 한도", sent[0])
+        self.assertIn("5시간 단기 한도", sent[0])
+        self.assertIn("7일 장기 한도", sent[0])
 
     def test_jsonl_fallback_status_is_marked_estimated(self):
         """JSONL 폴백을 쓰면 응답에 추정값임이 드러나야 한다."""
