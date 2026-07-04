@@ -86,6 +86,7 @@ def load_config() -> dict:
         "GITHUB_OWNER",
         "GITHUB_REPO",
         "CLAUDE_PROJECTS_DIR",
+        "GJC_SESSIONS_DIR",
         "POLL_INTERVAL",
         "NOTIFY_ADVANCE_SECONDS",
     ]:
@@ -219,10 +220,7 @@ def get_current_limit_status(cfg: dict) -> LimitStatus:
     if cache_status.five_hour_reset is not None or cache_status.seven_day_reset is not None:
         return cache_status
 
-    projects_dir = get_claude_projects_dir(cfg)
-    if not projects_dir.exists():
-        return LimitStatus()
-    oldest_ts = find_oldest_message_in_window(projects_dir)
+    oldest_ts = find_oldest_message_in_window(get_jsonl_source_dirs(cfg))
     if oldest_ts is None:
         return LimitStatus()
 
@@ -268,10 +266,38 @@ def get_claude_projects_dir(cfg: dict) -> Path:
     return Path(raw).expanduser()
 
 
-def find_oldest_message_in_window(projects_dir: Path, window_hours: int = WINDOW_HOURS) -> datetime | None:
+def get_gjc_sessions_dir(cfg: dict) -> Path:
+    """GJC(Gajae Code)가 Claude Code를 구동할 때 쓰는 세션 jsonl 디렉터리를 반환합니다.
+
+    GJC는 `~/.claude/statusLine` 훅을 거치지 않고 자체 TUI에서 상태줄을 그리며,
+    대화 로그도 `~/.claude/projects` 대신 `~/.gjc/agent/sessions/**/*.jsonl`에 쓴다.
+    각 라인은 Claude Code 세션 로그와 동일하게 최상위 `timestamp` 필드(ISO 8601)를
+    가지므로 find_oldest_message_in_window()가 그대로 재사용 가능하다.
+    """
+    raw = cfg.get("GJC_SESSIONS_DIR", "~/.gjc/agent/sessions")
+    return Path(raw).expanduser()
+
+
+def get_jsonl_source_dirs(cfg: dict) -> list[Path]:
+    """토큰 윈도우 추정에 쓸 jsonl 디렉터리 목록을 반환합니다(존재하는 것만).
+
+    Claude Code 네이티브 CLI와 GJC 둘 다에서 실행된 세션을 모두 포함해야
+    5시간 롤링 윈도우가 어느 클라이언트로 소비됐든 정확히 잡힌다.
+    """
+    dirs = [get_claude_projects_dir(cfg), get_gjc_sessions_dir(cfg)]
+    return [d for d in dirs if d.exists()]
+
+
+def find_oldest_message_in_window(
+    projects_dirs: Path | list[Path], window_hours: int = WINDOW_HOURS
+) -> datetime | None:
     """
     현재 시각 기준 최근 `window_hours` 시간 이내 메시지 중
     가장 오래된 메시지의 타임스탬프를 반환합니다.
+
+    `projects_dirs`는 단일 디렉터리(Path) 또는 디렉터리 목록(list[Path])을
+    받는다. 목록을 넘기면 모든 디렉터리를 함께 스캔해 전체 중 가장 오래된
+    타임스탬프를 반환한다(Claude Code 네이티브 CLI + GJC 세션 통합 스캔용).
 
     반환값: UTC datetime 또는 None (해당 메시지 없음)
     """
@@ -280,8 +306,13 @@ def find_oldest_message_in_window(projects_dir: Path, window_hours: int = WINDOW
 
     oldest: datetime | None = None
 
-    pattern = str(projects_dir / "**" / "*.jsonl")
-    for filepath in glob.glob(pattern, recursive=True):
+    dirs = [projects_dirs] if isinstance(projects_dirs, Path) else list(projects_dirs)
+    filepaths = [
+        filepath
+        for projects_dir in dirs
+        for filepath in glob.glob(str(projects_dir / "**" / "*.jsonl"), recursive=True)
+    ]
+    for filepath in filepaths:
         try:
             with open(filepath, encoding="utf-8") as f:
                 for line in f:

@@ -70,7 +70,8 @@ type %USERPROFILE%\.token_alert.pid
 ### 감지 로직 (`src/watcher.py`)
 
 - `~/.claude/token_alert_usage.json`의 `five_hour_resets_at`(Unix timestamp) 우선 읽음 — Claude Code가 서버 응답 기반으로 기록하는 실제 초기화 시각
-- 해당 파일 없거나 필드 없으면 폴백: `~/.claude/projects/**/*.jsonl` 전체를 glob으로 스캔 → 현재 시각 기준 5시간 이내 가장 오래된 타임스탬프 + 5h
+- 해당 파일 없거나 필드 없으면 폴백: `~/.claude/projects/**/*.jsonl` **및** `~/.gjc/agent/sessions/**/*.jsonl`(GJC로 Claude Code를 구동한 세션) 전체를 glob으로 스캔 → 현재 시각 기준 5시간 이내 가장 오래된 타임스탬프 + 5h
+- **GJC(Gajae Code) 호환**: GJC는 자체 TUI에서 상태줄을 그려 `~/.claude`의 statusLine 훅(`~/.claude/statusline.py` → `watcher.py --write-status-line`)을 거치지 않으므로 GJC 세션에서는 usage cache(`token_alert_usage.json`)가 갱신되지 않는다. 대신 GJC가 `~/.gjc/agent/sessions/**/*.jsonl`에 남기는 세션 로그가 Claude Code 로그와 동일한 최상위 `timestamp` 필드(ISO 8601)를 쓰므로, jsonl 폴백 스캔에 그대로 합류시켜 감지한다(`get_jsonl_source_dirs()`).
 - `/status` 텔레그램 명령도 동일 우선순위로 초기화 시각 조회 (dispatch 상태와 무관하게 실시간 정확한 값 표시)
 - 직전 예약 시각과 동일하면 중복 dispatch 방지 (`~/.token_alert_state.json`에 저장)
 - dispatch 직전 진행 중인 이전 워크플로우 실행을 모두 취소 (`cancel_previous_workflow_runs`) — 초기화 시각이 바뀔 때 중복 알림 방지

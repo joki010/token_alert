@@ -410,6 +410,60 @@ class TestUsageCacheStatus(unittest.TestCase):
                 )
 
         self.assertIn("추정값", sent[0])
+    def test_jsonl_fallback_uses_gjc_sessions_dir_when_claude_projects_missing(self):
+        """CLAUDE_PROJECTS_DIR가 없어도 GJC_SESSIONS_DIR의 jsonl로 추정값을 계산해야 한다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            gjc_sessions_dir = Path(tmp) / "gjc-sessions" / "-some-project"
+            gjc_sessions_dir.mkdir(parents=True)
+            log_path = gjc_sessions_dir / "2026-01-01T00-00-00-000Z_abc.jsonl"
+            ts = datetime.now(timezone.utc) - timedelta(hours=1)
+            log_path.write_text(json.dumps({"type": "session", "timestamp": ts.isoformat()}) + "\n", encoding="utf-8")
+            sent = []
+
+            with patch.object(watcher, "USAGE_FILE", Path(tmp) / "missing.json"), \
+                 patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
+                watcher.handle_telegram_command(
+                    {
+                        "TELEGRAM_BOT_TOKEN": "fake",
+                        "TELEGRAM_CHAT_ID": "1",
+                        "CLAUDE_PROJECTS_DIR": str(Path(tmp) / "missing-claude-projects"),
+                        "GJC_SESSIONS_DIR": str(Path(tmp) / "gjc-sessions"),
+                    },
+                    {"message": {"text": "/status", "chat": {"id": 1}}},
+                    self._make_logger(),
+                )
+
+        self.assertIn("추정값", sent[0])
+
+    def test_jsonl_source_dirs_merge_picks_oldest_across_both(self):
+        """Claude 네이티브 CLI와 GJC 세션이 함께 있으면 둘 중 더 오래된 타임스탬프를 골라야 한다."""
+        with tempfile.TemporaryDirectory() as tmp:
+            claude_dir = Path(tmp) / "claude-projects"
+            gjc_dir = Path(tmp) / "gjc-sessions"
+            claude_dir.mkdir()
+            gjc_dir.mkdir()
+
+            newer = datetime.now(timezone.utc) - timedelta(minutes=10)
+            older = datetime.now(timezone.utc) - timedelta(hours=3)
+            (claude_dir / "a.jsonl").write_text(json.dumps({"timestamp": newer.isoformat()}) + "\n", encoding="utf-8")
+            (gjc_dir / "b.jsonl").write_text(json.dumps({"timestamp": older.isoformat()}) + "\n", encoding="utf-8")
+
+            cfg = {"CLAUDE_PROJECTS_DIR": str(claude_dir), "GJC_SESSIONS_DIR": str(gjc_dir)}
+            oldest = watcher.find_oldest_message_in_window(watcher.get_jsonl_source_dirs(cfg))
+
+        self.assertAlmostEqual(oldest.timestamp(), older.timestamp(), delta=1)
+
+    def test_find_oldest_message_in_window_accepts_single_path(self):
+        """단일 Path 인자로도 기존처럼 동작해야 한다(하위 호환)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects_dir = Path(tmp)
+            ts = datetime.now(timezone.utc) - timedelta(hours=1)
+            (projects_dir / "a.jsonl").write_text(json.dumps({"timestamp": ts.isoformat()}) + "\n", encoding="utf-8")
+
+            oldest = watcher.find_oldest_message_in_window(projects_dir)
+
+        self.assertAlmostEqual(oldest.timestamp(), ts.timestamp(), delta=1)
+
 
     def test_status_ignores_state_after_dispatch_failure(self):
         """dispatch 실패 뒤 stale state가 실제 초기화 시각처럼 표시되면 안 된다."""
