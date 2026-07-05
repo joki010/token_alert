@@ -21,3 +21,4 @@ claudecode-tray.ico
 
 # 워크플로우 추적 파일 (로컬 전용)
 .fablize/
+.omc/
