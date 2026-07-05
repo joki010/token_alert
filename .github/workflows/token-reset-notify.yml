@@ -68,14 +68,7 @@ jobs:
 
           NOTIFY_KST=$(TZ=Asia/Seoul date -d "$NOTIFY_TIME" "+%Y-%m-%d %H:%M KST" 2>/dev/null || echo "$NOTIFY_TIME")
 
-          MESSAGE="🔔 <b>Claude Code 토큰 초기화 완료 예정</b>
-──────────────────
-⚡ <b>5시간 단기 한도</b>가 곧 초기화됩니다.
-
-• 초기화 시각: <code>${RESET_KST}</code>
-• 알림 전송: <code>${NOTIFY_KST}</code>
-
-<i>token_alert by GitHub Actions</i>"
+          MESSAGE=$'🔔 <b>Claude Code 토큰 초기화 완료 예정</b>\n──────────────────\n⚡ <b>5시간 단기 한도</b>가 곧 초기화됩니다.\n\n• 초기화 시각: <code>'"${RESET_KST}"$'</code>\n• 알림 전송: <code>'"${NOTIFY_KST}"$'</code>\n\n<i>token_alert by GitHub Actions</i>'
 
           # URL 인코딩 없이 JSON 으로 전송
           curl -s -X POST \
