@@ -860,8 +860,12 @@ def save_state(state: dict) -> None:
 # 이전 워크플로우 취소
 # ──────────────────────────────────────────
 
-def _get_pending_runs(cfg: dict, logger: logging.Logger) -> list:
-    """in_progress 및 queued 상태의 token-reset-notify 워크플로우 실행 목록을 반환한다."""
+def _get_pending_runs(cfg: dict, logger: logging.Logger, target_label: str | None = None) -> list:
+    """in_progress 및 queued 상태의 token-reset-notify 워크플로우 실행 목록을 반환한다.
+
+    target_label 이 주어지면 같은 알림 대상(예: "Codex Apple 5시간")의 실행만 반환한다.
+    (run-name 이 "{target_label} {reset_time}" 형태이므로 접두어로 필터링한다.)
+    """
     token = cfg.get("GITHUB_TOKEN", "")
     owner = cfg.get("GITHUB_OWNER", "")
     repo = cfg.get("GITHUB_REPO", "token_alert")
@@ -887,6 +891,10 @@ def _get_pending_runs(cfg: dict, logger: logging.Logger) -> list:
             runs.extend(data.get("workflow_runs", []))
         except (urllib.error.URLError, json.JSONDecodeError) as e:
             logger.warning(f"진행 중 워크플로우 목록 조회 실패 (status={status}): {e}")
+
+    if target_label is not None:
+        prefix = f"{target_label} "
+        runs = [run for run in runs if str(run.get("display_title", "")).startswith(prefix)]
 
     return runs
 
@@ -964,8 +972,8 @@ def dispatch_github_workflow(
         }
     ).encode("utf-8")
 
-    if not dry_run and cfg.get("_SKIP_CANCEL_PENDING") != "1":
-        pending_runs = _get_pending_runs(cfg, logger)
+    if not dry_run:
+        pending_runs = _get_pending_runs(cfg, logger, target_label=target_label)
         cancel_previous_workflow_runs(cfg, logger, pending_runs)
 
     if dry_run:
@@ -1285,8 +1293,6 @@ def _schedule_provider_windows(
     if not isinstance(scheduled, dict):
         scheduled = {}
     changed = False
-    dispatch_cfg = dict(cfg)
-    dispatch_cfg["_SKIP_CANCEL_PENDING"] = "1"
 
     for window in status.provider_windows:
         if window.reset is None:
@@ -1307,7 +1313,7 @@ def _schedule_provider_windows(
         window_name = "5시간" if window.window == "five_hour" else "7일"
         target_label = f"{window.label} {window_name}"
         logger.info(f"{target_label} 초기화 예정: {reset_iso}")
-        if dispatch_github_workflow(dispatch_cfg, window.reset, logger, dry_run=dry_run, target_label=target_label):
+        if dispatch_github_workflow(cfg, window.reset, logger, dry_run=dry_run, target_label=target_label):
             scheduled[key] = _scheduled_reset_value(reset_iso)
             changed = True
 
