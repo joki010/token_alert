@@ -788,6 +788,40 @@ class TestDirectUsageFetch(unittest.TestCase):
         )
         self.assertIn("scheduled_resets", state)
         self.assertEqual(len(state["scheduled_resets"]), 3)
+        for value in state["scheduled_resets"].values():
+            self.assertEqual(value["alert_format_version"], watcher.RESET_ALERT_FORMAT_VERSION)
+
+    def test_run_once_reschedules_legacy_string_state_for_new_alert_format(self):
+        now = datetime.now(timezone.utc)
+        reset = now + timedelta(hours=1)
+        reset_iso = reset.astimezone(timezone(timedelta(hours=9))).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+        status = watcher.LimitStatus(
+            five_hour_reset=reset,
+            source="direct",
+            provider_windows=(
+                watcher.ProviderWindow(
+                    provider="codex",
+                    label="Codex work",
+                    window="five_hour",
+                    reset=reset,
+                    profile="work",
+                ),
+            ),
+        )
+        state = {"scheduled_resets": {"codex:work:five_hour": reset_iso}}
+        dispatched = []
+
+        with patch.object(watcher, "get_current_limit_status", return_value=status), \
+             patch.object(watcher, "load_state", return_value=state), \
+             patch.object(watcher, "save_state", side_effect=lambda new_state: state.update(new_state)), \
+             patch.object(watcher, "dispatch_github_workflow", side_effect=lambda cfg, reset, logger, dry_run=False, target_label="": dispatched.append(target_label) or True):
+            watcher.run_once({}, self._make_logger(), dry_run=False)
+
+        self.assertEqual(dispatched, ["Codex work 5시간"])
+        self.assertEqual(
+            state["scheduled_resets"]["codex:work:five_hour"]["alert_format_version"],
+            watcher.RESET_ALERT_FORMAT_VERSION,
+        )
 
     def test_status_command_sends_provider_choice_and_text_fallback(self):
         sent = []

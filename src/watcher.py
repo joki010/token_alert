@@ -38,6 +38,7 @@ PID_FILE = Path.home() / ".token_alert.pid"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
 USAGE_FILE = Path.home() / ".claude" / "token_alert_usage.json"
 USAGE_CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
+RESET_ALERT_FORMAT_VERSION = "provider-layout-v2"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_USER_AGENT = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
@@ -1245,6 +1246,33 @@ def _window_reset_iso(window: ProviderWindow) -> str:
     return window.reset.astimezone(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
 
 
+def _scheduled_reset_value(reset_iso: str) -> dict:
+    return {
+        "reset_time": reset_iso,
+        "alert_format_version": RESET_ALERT_FORMAT_VERSION,
+    }
+
+
+def _scheduled_reset_matches(previous, reset_iso: str, reset_dt: datetime) -> bool:
+    if not isinstance(previous, dict):
+        return False
+    if previous.get("alert_format_version") != RESET_ALERT_FORMAT_VERSION:
+        return False
+    previous_reset = previous.get("reset_time")
+
+    if previous_reset == reset_iso:
+        return True
+
+    if isinstance(previous_reset, str):
+        try:
+            previous_dt = datetime.fromisoformat(previous_reset)
+            return abs((reset_dt - previous_dt).total_seconds()) < 60
+        except ValueError:
+            return False
+
+    return False
+
+
 def _schedule_provider_windows(
     cfg: dict,
     status: LimitStatus,
@@ -1273,21 +1301,14 @@ def _schedule_provider_windows(
 
         reset_iso = _window_reset_iso(window)
         previous = scheduled.get(key)
-        if isinstance(previous, str):
-            try:
-                previous_dt = datetime.fromisoformat(previous)
-                if abs((window.reset - previous_dt).total_seconds()) < 60:
-                    continue
-            except ValueError:
-                pass
-        if previous == reset_iso:
+        if _scheduled_reset_matches(previous, reset_iso, window.reset):
             continue
 
         window_name = "5시간" if window.window == "five_hour" else "7일"
         target_label = f"{window.label} {window_name}"
         logger.info(f"{target_label} 초기화 예정: {reset_iso}")
         if dispatch_github_workflow(dispatch_cfg, window.reset, logger, dry_run=dry_run, target_label=target_label):
-            scheduled[key] = reset_iso
+            scheduled[key] = _scheduled_reset_value(reset_iso)
             changed = True
 
     if changed:
