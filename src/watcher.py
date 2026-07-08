@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import glob
+import base64
 import logging
 import argparse
 import threading
@@ -36,6 +37,27 @@ PID_FILE = Path.home() / ".token_alert.pid"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
 USAGE_FILE = Path.home() / ".claude" / "token_alert_usage.json"
 USAGE_CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+CODEX_USER_AGENT = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
+CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLAUDE_USER_AGENT = "ClaudeUsageBar/0.6"
+DEFAULT_CLAUDE_SCOPES = ("user:profile", "user:inference")
+OPENAI_AUTH_CLAIM = "https://api.openai.com/auth"
+
+
+@dataclass(frozen=True)
+class ProviderWindow:
+    provider: str
+    label: str
+    window: str
+    reset: datetime | None
+    remaining_percentage: float | None = None
+    used_percentage: float | None = None
+    estimated: bool = False
+    profile: str | None = None
+    account: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,8 +66,41 @@ class LimitStatus:
     seven_day_reset: datetime | None = None
     five_hour_used_percentage: float | None = None
     seven_day_used_percentage: float | None = None
+    five_hour_remaining_percentage: float | None = None
+    seven_day_remaining_percentage: float | None = None
     source: str | None = None
     estimated: bool = False
+    provider_windows: tuple[ProviderWindow, ...] = ()
+
+
+@dataclass(frozen=True)
+class CodexAuthSummary:
+    email: str | None
+    plan: str | None
+    organization: str | None
+    account_id: str | None
+    access_token: str | None
+    error: str | None = None
+
+    def __str__(self) -> str:
+        token = "null" if self.access_token is None else "[redacted]"
+        return (
+            "CodexAuthSummary("
+            f"email={self.email}, plan={self.plan}, organization={self.organization}, "
+            f"account_id={self.account_id}, access_token={token}, error={self.error})"
+        )
+
+
+@dataclass(frozen=True)
+class ClaudeCredentials:
+    access_token: str
+    refresh_token: str | None
+    expires_at_epoch: int | None
+    scopes: tuple[str, ...]
+
+    def __str__(self) -> str:
+        refresh = "null" if self.refresh_token is None else "[redacted]"
+        return f"ClaudeCredentials(access_token=[redacted], refresh_token={refresh}, expires_at_epoch={self.expires_at_epoch})"
 
 
 def load_config() -> dict:
@@ -85,10 +140,16 @@ def load_config() -> dict:
         "GITHUB_TOKEN",
         "GITHUB_OWNER",
         "GITHUB_REPO",
+        "GITHUB_REF",
         "CLAUDE_PROJECTS_DIR",
         "GJC_SESSIONS_DIR",
         "POLL_INTERVAL",
         "NOTIFY_ADVANCE_SECONDS",
+        "ENABLE_DIRECT_USAGE",
+        "CODEX_HOME",
+        "CODEX_AUTH_JSON",
+        "CODEX_PROFILES_DIR",
+        "CLAUDE_USAGE_CREDENTIALS",
     ]:
         env_val = os.environ.get(key)
         if env_val:
@@ -176,6 +237,365 @@ def _usage_used_percentage(data: dict, window: str) -> float | None:
         return None
 
 
+def _read_json_file(path: Path) -> dict | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _json_request(
+    url: str,
+    headers: dict[str, str],
+    logger: logging.Logger,
+    method: str = "GET",
+    body: bytes | None = None,
+    timeout: int = 15,
+) -> dict | None:
+    try:
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status < 200 or resp.status >= 300:
+                logger.debug(f"사용량 API 응답 코드: {resp.status}")
+                return None
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
+        logger.debug(f"사용량 API 조회 실패: {exc}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _decode_jwt_payload(token: str | None) -> dict | None:
+    if not token:
+        return None
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1].replace("-", "+").replace("_", "/")
+    payload = payload + "=" * ((4 - len(payload) % 4) % 4)
+    try:
+        data = json.loads(base64.b64decode(payload))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _str_value(data: dict | None, key: str) -> str | None:
+    if data is None:
+        return None
+    value = data.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _num_value(data: dict | None, key: str) -> float | None:
+    if data is None:
+        return None
+    value = data.get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _dict_value(data: dict | None, key: str) -> dict | None:
+    if data is None:
+        return None
+    value = data.get(key)
+    return value if isinstance(value, dict) else None
+
+
+def _default_codex_auth_path(cfg: dict) -> Path:
+    configured = cfg.get("CODEX_AUTH_JSON")
+    if configured:
+        return Path(configured).expanduser()
+    codex_home = Path(cfg.get("CODEX_HOME", "~/.codex")).expanduser()
+    return codex_home / "auth.json"
+
+
+def _default_codex_profiles_dir(cfg: dict) -> Path:
+    configured = cfg.get("CODEX_PROFILES_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".codex-switch" / "profiles"
+
+
+def _default_claude_credentials_path(cfg: dict) -> Path:
+    configured = cfg.get("CLAUDE_USAGE_CREDENTIALS")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".config" / "claude-usage-bar" / "credentials.json"
+
+
+def read_codex_auth(auth_path: Path) -> CodexAuthSummary | None:
+    data = _read_json_file(auth_path)
+    if data is None:
+        return None
+    tokens = _dict_value(data, "tokens")
+    if tokens is None:
+        return CodexAuthSummary(None, None, None, None, None, "auth.json is missing tokens")
+
+    jwt = _decode_jwt_payload(_str_value(tokens, "id_token"))
+    auth = _dict_value(jwt, OPENAI_AUTH_CLAIM)
+    orgs = auth.get("organizations") if auth is not None else None
+    organization = None
+    if isinstance(orgs, list):
+        for item in orgs:
+            if isinstance(item, dict) and item.get("is_default") is True:
+                organization = _str_value(item, "title")
+                break
+        if organization is None:
+            first = next((item for item in orgs if isinstance(item, dict)), None)
+            organization = _str_value(first, "title")
+
+    return CodexAuthSummary(
+        email=_str_value(jwt, "email"),
+        plan=_str_value(auth, "chatgpt_plan_type"),
+        organization=organization,
+        account_id=_str_value(tokens, "account_id"),
+        access_token=_str_value(tokens, "access_token"),
+    )
+
+
+def _codex_window(
+    rate: dict | None,
+    window: str,
+    label: str,
+    now: datetime,
+    profile: str | None = None,
+    account: str | None = None,
+) -> ProviderWindow | None:
+    key = "primary_window" if window == "five_hour" else "secondary_window"
+    camel_key = "primaryWindow" if window == "five_hour" else "secondaryWindow"
+    data = _dict_value(rate, key) or _dict_value(rate, camel_key)
+    if data is None:
+        return None
+    used = max(0.0, min(100.0, _num_value(data, "used_percent") or _num_value(data, "usedPercent") or 0.0))
+    reset_after = _num_value(data, "reset_after_seconds") or _num_value(data, "resetAfterSeconds")
+    reset = now + timedelta(seconds=reset_after) if reset_after is not None and reset_after > 0 else None
+    display_label = f"Codex {profile}" if profile else "Codex"
+    return ProviderWindow(
+        provider="codex",
+        label=display_label,
+        window=window,
+        reset=reset,
+        remaining_percentage=round(100 - used),
+        used_percentage=used,
+        profile=profile,
+        account=account,
+    )
+
+
+def _status_from_windows(windows: tuple[ProviderWindow, ...], source: str, estimated: bool = False) -> LimitStatus:
+    five_windows = [w for w in windows if w.window == "five_hour" and w.reset is not None]
+    seven_windows = [w for w in windows if w.window == "seven_day" and w.reset is not None]
+    five_window = min(five_windows, key=lambda w: w.reset) if five_windows else None
+    seven_window = min(seven_windows, key=lambda w: w.reset) if seven_windows else None
+    return LimitStatus(
+        five_hour_reset=five_window.reset if five_window is not None else None,
+        seven_day_reset=seven_window.reset if seven_window is not None else None,
+        five_hour_used_percentage=five_window.used_percentage if five_window is not None else None,
+        seven_day_used_percentage=seven_window.used_percentage if seven_window is not None else None,
+        five_hour_remaining_percentage=five_window.remaining_percentage if five_window is not None else None,
+        seven_day_remaining_percentage=seven_window.remaining_percentage if seven_window is not None else None,
+        source=source,
+        estimated=estimated,
+        provider_windows=windows,
+    )
+
+
+def fetch_codex_usage_status(
+    auth: CodexAuthSummary | None,
+    now: datetime,
+    logger: logging.Logger,
+    profile: str | None = None,
+) -> LimitStatus:
+    if auth is None or auth.error is not None or not auth.access_token or not auth.account_id:
+        return LimitStatus()
+    data = _json_request(
+        CODEX_USAGE_URL,
+        {
+            "Authorization": f"Bearer {auth.access_token}",
+            "ChatGPT-Account-Id": auth.account_id,
+            "User-Agent": CODEX_USER_AGENT,
+        },
+        logger,
+        timeout=12,
+    )
+    if data is None:
+        return LimitStatus()
+    rate = _dict_value(data, "rate_limit") or _dict_value(data, "rateLimit")
+    windows = tuple(
+        window for window in (
+            _codex_window(rate, "five_hour", "5시간", now, profile, auth.email or auth.account_id),
+            _codex_window(rate, "seven_day", "7일", now, profile, auth.email or auth.account_id),
+        )
+        if window is not None and window.reset is not None
+    )
+    return _status_from_windows(windows, "codex")
+
+
+def _codex_profile_auths(cfg: dict) -> list[tuple[str, CodexAuthSummary]]:
+    profiles_dir = _default_codex_profiles_dir(cfg)
+    if not profiles_dir.exists():
+        return []
+    pairs = []
+    for profile_dir in sorted((p for p in profiles_dir.iterdir() if p.is_dir()), key=lambda p: p.name):
+        auth = read_codex_auth(profile_dir / "auth.json")
+        if auth is not None and auth.error is None:
+            pairs.append((profile_dir.name, auth))
+    return pairs
+
+
+def load_claude_credentials(path: Path) -> ClaudeCredentials | None:
+    data = _read_json_file(path)
+    if data is None:
+        return None
+    access_token = _str_value(data, "accessToken")
+    if not access_token:
+        return None
+    scopes_raw = data.get("scopes")
+    scopes = tuple(item for item in scopes_raw if isinstance(item, str)) if isinstance(scopes_raw, list) else DEFAULT_CLAUDE_SCOPES
+    expires_at = _parse_reset_datetime(data.get("expiresAt"))
+    return ClaudeCredentials(
+        access_token=access_token,
+        refresh_token=_str_value(data, "refreshToken"),
+        expires_at_epoch=int(expires_at.timestamp()) if expires_at is not None else None,
+        scopes=scopes or DEFAULT_CLAUDE_SCOPES,
+    )
+
+
+def _save_claude_credentials(path: Path, credentials: ClaudeCredentials) -> None:
+    payload = {
+        "accessToken": credentials.access_token,
+        "refreshToken": credentials.refresh_token,
+        "expiresAt": (
+            datetime.fromtimestamp(credentials.expires_at_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if credentials.expires_at_epoch is not None else None
+        ),
+        "scopes": list(credentials.scopes),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    tmp.replace(path)
+
+
+def _refresh_claude_credentials(
+    path: Path,
+    credentials: ClaudeCredentials | None,
+    now: datetime,
+    logger: logging.Logger,
+) -> ClaudeCredentials | None:
+    if credentials is None:
+        return None
+    if credentials.expires_at_epoch is None or credentials.expires_at_epoch > int(now.timestamp()) + 120:
+        return credentials
+    if not credentials.refresh_token:
+        return None
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": credentials.refresh_token,
+        "client_id": CLAUDE_CLIENT_ID,
+        "scope": " ".join(credentials.scopes),
+    }).encode("utf-8")
+    data = _json_request(
+        CLAUDE_TOKEN_URL,
+        {"User-Agent": CLAUDE_USER_AGENT, "Content-Type": "application/json"},
+        logger,
+        method="POST",
+        body=body,
+    )
+    if data is None:
+        return None
+    access_token = _str_value(data, "access_token")
+    if not access_token:
+        return None
+    expires_in = _num_value(data, "expires_in")
+    refreshed = ClaudeCredentials(
+        access_token=access_token,
+        refresh_token=_str_value(data, "refresh_token") or credentials.refresh_token,
+        expires_at_epoch=int(now.timestamp() + expires_in) if expires_in is not None else credentials.expires_at_epoch,
+        scopes=tuple(str(item) for item in data.get("scope", "").split()) or credentials.scopes,
+    )
+    try:
+        _save_claude_credentials(path, refreshed)
+    except OSError as exc:
+        logger.debug(f"Claude 사용량 자격 저장 실패: {exc}")
+    return refreshed
+
+
+def _claude_window(data: dict, window: str) -> ProviderWindow | None:
+    bucket = _dict_value(data, window)
+    if bucket is None:
+        return None
+    reset = _future_datetime(bucket.get("resets_at"), datetime.now(timezone.utc))
+    used = _num_value(bucket, "utilization")
+    if reset is None:
+        return None
+    return ProviderWindow(
+        provider="claude",
+        label="Claude",
+        window=window,
+        reset=reset,
+        used_percentage=used,
+    )
+
+
+def fetch_claude_usage_status(credentials: ClaudeCredentials | None, logger: logging.Logger) -> LimitStatus:
+    if credentials is None:
+        return LimitStatus()
+    data = _json_request(
+        CLAUDE_USAGE_URL,
+        {
+            "Authorization": f"Bearer {credentials.access_token}",
+            "anthropic-beta": "oauth-2025-04-20",
+        },
+        logger,
+    )
+    if data is None:
+        return LimitStatus()
+    windows = tuple(
+        window for window in (
+            _claude_window(data, "five_hour"),
+            _claude_window(data, "seven_day"),
+        )
+        if window is not None
+    )
+    status = _status_from_windows(windows, "claude")
+    return status if status.five_hour_reset is not None or status.seven_day_reset is not None else LimitStatus()
+
+
+def fetch_direct_usage_status(cfg: dict, logger: logging.Logger | None = None) -> LimitStatus:
+    direct_configured = any(key in cfg for key in ("CODEX_HOME", "CODEX_AUTH_JSON", "CODEX_PROFILES_DIR", "CLAUDE_USAGE_CREDENTIALS"))
+    if not direct_configured and cfg.get("ENABLE_DIRECT_USAGE") != "1":
+        return LimitStatus()
+    log = logger or logging.getLogger("token_alert")
+    now = datetime.now(timezone.utc)
+    codex_profiles = _codex_profile_auths(cfg)
+    if codex_profiles:
+        codex_windows = tuple(
+            window
+            for profile, auth in codex_profiles
+            for window in fetch_codex_usage_status(auth, now, log, profile).provider_windows
+        )
+        codex = _status_from_windows(codex_windows, "codex")
+    else:
+        codex = fetch_codex_usage_status(read_codex_auth(_default_codex_auth_path(cfg)), now, log)
+    claude_path = _default_claude_credentials_path(cfg)
+    claude_credentials = _refresh_claude_credentials(
+        claude_path,
+        load_claude_credentials(claude_path),
+        now,
+        log,
+    )
+    claude = fetch_claude_usage_status(claude_credentials, log)
+    windows = codex.provider_windows + claude.provider_windows
+    status = _status_from_windows(windows, "direct")
+    return status if status.five_hour_reset is not None or status.seven_day_reset is not None else LimitStatus()
+
+
 def read_limit_status_from_usage_file() -> LimitStatus:
     try:
         with open(USAGE_FILE, encoding="utf-8") as f:
@@ -216,6 +636,10 @@ def read_reset_time_from_usage_file() -> datetime | None:
 
 
 def get_current_limit_status(cfg: dict) -> LimitStatus:
+    direct_status = fetch_direct_usage_status(cfg)
+    if direct_status.five_hour_reset is not None or direct_status.seven_day_reset is not None:
+        return direct_status
+
     cache_status = read_limit_status_from_usage_file()
     if cache_status.five_hour_reset is not None or cache_status.seven_day_reset is not None:
         return cache_status
@@ -508,6 +932,7 @@ def dispatch_github_workflow(
     reset_time: datetime,
     logger: logging.Logger,
     dry_run: bool = False,
+    target_label: str = "Claude Code 5시간",
 ) -> bool:
     """
     GitHub Actions workflow_dispatch 이벤트를 전송합니다.
@@ -528,15 +953,16 @@ def dispatch_github_workflow(
 
     payload = json.dumps(
         {
-            "ref": "main",
+            "ref": cfg.get("GITHUB_REF", "main"),
             "inputs": {
                 "reset_time": reset_iso,
                 "notify_time": notify_iso,
+                "target_label": target_label,
             },
         }
     ).encode("utf-8")
 
-    if not dry_run:
+    if not dry_run and cfg.get("_SKIP_CANCEL_PENDING") != "1":
         pending_runs = _get_pending_runs(cfg, logger)
         cancel_previous_workflow_runs(cfg, logger, pending_runs)
 
@@ -581,7 +1007,13 @@ def dispatch_github_workflow(
 # ──────────────────────────────────────────
 # 텔레그램 봇 명령어 (Long Polling)
 # ──────────────────────────────────────────
-def send_telegram_message(cfg: dict, text: str, logger: logging.Logger, dry_run: bool = False) -> None:
+def send_telegram_message(
+    cfg: dict,
+    text: str,
+    logger: logging.Logger,
+    dry_run: bool = False,
+    reply_markup: dict | None = None,
+) -> None:
     """텔레그램 메시지를 전송한다. 실패 시 예외 없이 로그만 남긴다."""
     if dry_run:
         logger.info(f"[DRY-RUN] 텔레그램 전송 건너뜀: {text[:80]}")
@@ -593,7 +1025,10 @@ def send_telegram_message(cfg: dict, text: str, logger: logging.Logger, dry_run:
         logger.warning("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 미설정 — 전송 건너뜀")
         return
 
-    payload = json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode("utf-8")
+    payload_data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        payload_data["reply_markup"] = reply_markup
+    payload = json.dumps(payload_data).encode("utf-8")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage",
         data=payload,
@@ -617,7 +1052,7 @@ def get_telegram_updates(cfg: dict, offset: int, logger: logging.Logger) -> list
 
     url = (
         f"https://api.telegram.org/bot{token}/getUpdates"
-        f"?offset={offset}&timeout=30&allowed_updates=%5B%22message%22%5D"
+        f"?offset={offset}&timeout=30&allowed_updates=%5B%22message%22%2C%22callback_query%22%5D"
     )
     try:
         req = urllib.request.Request(url)
@@ -646,10 +1081,42 @@ def _format_remaining(reset_dt: datetime, now: datetime) -> str:
         return f"{minutes}분"
 
 
+def _window_title(window: ProviderWindow) -> str:
+    name = "5시간" if window.window == "five_hour" else "7일"
+    return f"{window.label} {name} 한도"
+
+
+def _format_provider_window(window: ProviderWindow, now: datetime) -> str:
+    KST = timezone(timedelta(hours=9))
+    reset = window.reset
+    if reset is None:
+        return ""
+    reset_kst = reset.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
+    metric = ""
+    if window.remaining_percentage is not None:
+        metric = f"\n• 남은 비율: {window.remaining_percentage:g}%"
+    elif window.used_percentage is not None:
+        metric = f"\n• 사용 비율: {window.used_percentage:g}%"
+    estimate = " (추정)" if window.estimated else ""
+    return (
+        f"<b>{_window_title(window)}</b>{estimate}\n"
+        f"• 남은 시간: <b>{_format_remaining(reset, now)}</b>"
+        f"{metric}\n"
+        f"• 초기화 시각: <code>{reset_kst}</code>"
+    )
+
+
 def format_limit_status_reply(status: LimitStatus) -> str:
     now = datetime.now(timezone.utc)
     KST = timezone(timedelta(hours=9))
     lines = []
+
+    if status.provider_windows:
+        lines = [line for line in (_format_provider_window(window, now) for window in status.provider_windows) if line]
+        if lines:
+            prefix = "⏳ <b>토큰 한도 현황</b>\n──────────────────"
+            suffix = "\n\n(JSONL 로그 기반 추정값)" if status.estimated else ""
+            return f"{prefix}\n" + "\n\n".join(lines) + "\n──────────────────" + suffix
 
     if status.five_hour_reset is not None:
         reset_kst = status.five_hour_reset.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
@@ -681,8 +1148,112 @@ def format_limit_status_reply(status: LimitStatus) -> str:
     return f"{prefix}\n" + "\n\n".join(lines) + "\n──────────────────" + suffix
 
 
+def _provider_choice_markup() -> dict:
+    return {
+        "inline_keyboard": [[
+            {"text": "Codex", "callback_data": "status:codex"},
+            {"text": "Claude", "callback_data": "status:claude"},
+        ]]
+    }
+
+
+def _filter_status_by_provider(status: LimitStatus, provider: str) -> LimitStatus:
+    if status.provider_windows:
+        windows = tuple(window for window in status.provider_windows if window.provider == provider)
+        filtered = _status_from_windows(windows, status.source or provider, status.estimated)
+        return filtered if filtered.five_hour_reset is not None or filtered.seven_day_reset is not None else LimitStatus()
+    return status if provider == "claude" else LimitStatus()
+
+
+def _empty_provider_reply(provider: str) -> str:
+    name = "Codex" if provider == "codex" else "Claude"
+    return f"아직 {name} 한도 값을 받은 적이 없습니다."
+
+
+def _provider_status_reply(cfg: dict, provider: str) -> str:
+    status = _filter_status_by_provider(get_current_limit_status(cfg), provider)
+    if status.five_hour_reset is None and status.seven_day_reset is None:
+        return _empty_provider_reply(provider)
+    return format_limit_status_reply(status)
+
+
+def _window_state_key(window: ProviderWindow) -> str:
+    identity = window.profile or window.account or "default"
+    return f"{window.provider}:{identity}:{window.window}"
+
+
+def _window_reset_iso(window: ProviderWindow) -> str:
+    KST = timezone(timedelta(hours=9))
+    return window.reset.astimezone(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+
+
+def _schedule_provider_windows(
+    cfg: dict,
+    status: LimitStatus,
+    logger: logging.Logger,
+    dry_run: bool,
+) -> None:
+    now = datetime.now(timezone.utc)
+    state = load_state()
+    scheduled = state.get("scheduled_resets")
+    if not isinstance(scheduled, dict):
+        scheduled = {}
+    changed = False
+    dispatch_cfg = dict(cfg)
+    dispatch_cfg["_SKIP_CANCEL_PENDING"] = "1"
+
+    for window in status.provider_windows:
+        if window.reset is None:
+            continue
+        remaining_secs = (window.reset - now).total_seconds()
+        key = _window_state_key(window)
+        if remaining_secs <= 300:
+            if remaining_secs <= 0 and key in scheduled:
+                scheduled.pop(key, None)
+                changed = True
+            continue
+
+        reset_iso = _window_reset_iso(window)
+        previous = scheduled.get(key)
+        if isinstance(previous, str):
+            try:
+                previous_dt = datetime.fromisoformat(previous)
+                if abs((window.reset - previous_dt).total_seconds()) < 60:
+                    continue
+            except ValueError:
+                pass
+        if previous == reset_iso:
+            continue
+
+        window_name = "5시간" if window.window == "five_hour" else "7일"
+        target_label = f"{window.label} {window_name}"
+        logger.info(f"{target_label} 초기화 예정: {reset_iso}")
+        if dispatch_github_workflow(dispatch_cfg, window.reset, logger, dry_run=dry_run, target_label=target_label):
+            scheduled[key] = reset_iso
+            changed = True
+
+    if changed:
+        state["scheduled_resets"] = scheduled
+        state["dispatched_at"] = now.isoformat()
+        save_state(state)
+
+
 def handle_telegram_command(cfg: dict, update: dict, logger: logging.Logger, dry_run: bool = False) -> None:
     """텔레그램 update를 처리하고 명령에 맞는 응답을 전송한다."""
+    callback = update.get("callback_query")
+    if isinstance(callback, dict):
+        data = str(callback.get("data", ""))
+        message = callback.get("message", {})
+        chat_id = str(message.get("chat", {}).get("id", ""))
+        allowed_chat_id = str(cfg.get("TELEGRAM_CHAT_ID", ""))
+        if chat_id != allowed_chat_id:
+            logger.warning(f"허용되지 않은 chat_id에서 명령 수신: {chat_id}")
+            return
+        if data in ("status:codex", "status:claude"):
+            provider = data.split(":", 1)[1]
+            send_telegram_message(cfg, _provider_status_reply(cfg, provider), logger, dry_run=dry_run)
+        return
+
     message = update.get("message", {})
     chat_id = str(message.get("chat", {}).get("id", ""))
     text = message.get("text", "").strip()
@@ -695,16 +1266,20 @@ def handle_telegram_command(cfg: dict, update: dict, logger: logging.Logger, dry
         logger.warning(f"허용되지 않은 chat_id에서 명령 수신: {chat_id}")
         return
 
-    command = text.split()[0].split("@")[0].lower()
+    parts = text.split()
+    command = parts[0].split("@")[0].lower()
 
     if command == "/status":
-        reply = format_limit_status_reply(get_current_limit_status(cfg))
-
-        logger.info(f"[BOT] /status 응답: {reply[:60]}")
-        send_telegram_message(cfg, reply, logger, dry_run=dry_run)
+        if len(parts) > 1 and parts[1].lower() in ("codex", "claude"):
+            reply = _provider_status_reply(cfg, parts[1].lower())
+            logger.info(f"[BOT] /status 응답: {reply[:60]}")
+            send_telegram_message(cfg, reply, logger, dry_run=dry_run)
+        else:
+            reply = "조회할 공급자를 선택하세요.\n텍스트로는 /status codex 또는 /status claude 를 사용할 수 있습니다."
+            send_telegram_message(cfg, reply, logger, dry_run=dry_run, reply_markup=_provider_choice_markup())
 
     elif command.startswith("/"):
-        reply = "사용 가능한 명령:\n/status — 다음 토큰 초기화까지 남은 시간 조회"
+        reply = "사용 가능한 명령:\n/status — 공급자 선택\n/status codex — Codex 초기화 조회\n/status claude — Claude 초기화 조회"
         send_telegram_message(cfg, reply, logger, dry_run=dry_run)
 
 
@@ -733,6 +1308,10 @@ def run_telegram_polling(cfg: dict, logger: logging.Logger, dry_run: bool = Fals
 def run_once(cfg: dict, logger: logging.Logger, dry_run: bool = False) -> None:
     """한 번의 감지 주기를 실행합니다."""
     status = get_current_limit_status(cfg)
+    if status.provider_windows:
+        _schedule_provider_windows(cfg, status, logger, dry_run)
+        return
+
     reset_time = status.five_hour_reset
     if reset_time is None:
         logger.debug("초기화 시각 없음 — 알림 예약 불필요")

@@ -6,9 +6,9 @@ Claude Code의 5시간 토큰 초기화 시각을 자동으로 계산하여 컴�
 
 ```
 로컬 감지 데몬 (launchd / Task Scheduler)
-  ↓  ~/.claude/projects/**/JSONL 파일 모니터링 (10분마다)
-  ↓  5시간 창에서 가장 오래된 메시지 + 5h = 초기화 예정 시각 계산
-  ↓  GitHub Actions workflow_dispatch 호출 (reset_time 전달)
+  ↓  선택 시 Codex/Claude 사용량 API 직접 조회 (Codex 다중 프로필 포함)
+  ↓  실패하면 ~/.claude/token_alert_usage.json 또는 JSONL 추정값으로 폴백
+  ↓  공급자·계정·한도 창별로 GitHub Actions workflow_dispatch 호출
 
 GitHub Actions (클라우드)
   ↓  초기화 시각까지 sleep
@@ -46,8 +46,16 @@ cp config/config.env.example config/config.env
 | `GITHUB_TOKEN` | PAT (scope: workflow) |
 | `GITHUB_OWNER` | GitHub 사용자명 |
 | `GITHUB_REPO` | 저장소 이름 (기본: `token_alert`) |
+| `GITHUB_REF` | workflow_dispatch 대상 브랜치 (기본: `main`) |
 | `POLL_INTERVAL` | 감지 주기 초 (기본: 600) |
 | `NOTIFY_ADVANCE_SECONDS` | 초기화 시각 몇 초 전에 알림 (기본: 0) |
+| `ENABLE_DIRECT_USAGE` | `1`이면 Codex/Claude 사용량 API를 먼저 조회 |
+| `CODEX_PROFILES_DIR` | Codex 다중 프로필 경로 (기본: `~/.codex-switch/profiles`) |
+| `CODEX_AUTH_JSON` | Codex `auth.json` 경로 (기본: `~/.codex/auth.json`) |
+| `CODEX_HOME` | `CODEX_AUTH_JSON` 대신 쓸 Codex 홈 경로 |
+| `CLAUDE_USAGE_CREDENTIALS` | Claude usage OAuth 자격 파일 경로 (기본: `~/.config/claude-usage-bar/credentials.json`) |
+
+직접 조회가 실패하거나 자격 파일이 없으면 기존 캐시와 JSONL 추정 방식으로 계속 동작합니다. Codex는 `CODEX_PROFILES_DIR` 아래의 각 프로필 `auth.json`을 계정별로 조회하고, 유효한 프로필이 없을 때만 단일 `CODEX_AUTH_JSON`/`CODEX_HOME`으로 폴백합니다. 접근 토큰과 새로고침 토큰은 로그, 상태 파일, 텔레그램 응답에 쓰지 않습니다.
 
 ---
 
@@ -193,12 +201,18 @@ python platform\windows\uninstall.py
 
 | 명령 | 설명 |
 |------|------|
-| `/status` | 다음 토큰 초기화까지 남은 시간 조회 |
+| `/status` | Codex/Claude 선택 버튼 표시 |
+| `/status codex` | Codex 계정별 다음 토큰 초기화까지 남은 시간 조회 |
+| `/status claude` | Claude 다음 토큰 초기화까지 남은 시간 조회 |
 
 예시 응답:
 ```
-⏳ 다음 초기화까지 1시간 23분 남았습니다.
-예정 시각: 2026-06-22 21:30 KST
+⏳ 토큰 한도 현황
+──────────────────
+Codex work 5시간 한도
+• 남은 시간: 1시간 23분
+• 남은 비율: 42%
+• 초기화 시각: 2026-06-22 21:30 KST
 ```
 
 ---
@@ -206,7 +220,7 @@ python platform\windows\uninstall.py
 ## 테스트
 
 ```bash
-python3 -m pytest tests/test_watcher.py -v
+python3 -m unittest tests/test_watcher.py
 ```
 
 ---

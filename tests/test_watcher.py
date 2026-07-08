@@ -1,8 +1,10 @@
 import os
 import sys
 import json
+import base64
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -187,10 +189,10 @@ class TestTelegramBotCommands(unittest.TestCase):
         with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus()), \
              patch.object(watcher, "load_state", return_value=state), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
-            watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
+            watcher.handle_telegram_command(self._cfg(), self._make_update("/status claude"), self._make_logger())
 
         self.assertEqual(len(sent), 1)
-        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
+        self.assertIn("아직 Claude 한도 값을 받은 적이 없습니다", sent[0])
         self.assertNotIn("남았습니다", sent[0])
 
     def test_status_usage_file_takes_priority_over_state(self):
@@ -206,7 +208,7 @@ class TestTelegramBotCommands(unittest.TestCase):
         with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus(five_hour_reset=usage_reset, source="cache")), \
              patch.object(watcher, "load_state", side_effect=fake_load_state), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
-            watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
+            watcher.handle_telegram_command(self._cfg(), self._make_update("/status claude"), self._make_logger())
 
         self.assertEqual(len(load_state_calls), 0, "usage 파일 성공 시 load_state 호출 없어야 함")
         self.assertEqual(len(sent), 1)
@@ -219,10 +221,10 @@ class TestTelegramBotCommands(unittest.TestCase):
         with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus()), \
              patch.object(watcher, "load_state", return_value={}), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
-            watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
+            watcher.handle_telegram_command(self._cfg(), self._make_update("/status claude"), self._make_logger())
 
         self.assertEqual(len(sent), 1)
-        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
+        self.assertIn("아직 Claude 한도 값을 받은 적이 없습니다", sent[0])
 
     def test_status_with_past_reset_time(self):
         """과거 state 예약도 실제 초기화 시각처럼 응답하지 않아야 한다."""
@@ -236,10 +238,10 @@ class TestTelegramBotCommands(unittest.TestCase):
         with patch.object(watcher, "get_current_limit_status", return_value=watcher.LimitStatus()), \
              patch.object(watcher, "load_state", return_value=state), \
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
-            watcher.handle_telegram_command(self._cfg(), self._make_update("/status"), self._make_logger())
+            watcher.handle_telegram_command(self._cfg(), self._make_update("/status claude"), self._make_logger())
 
         self.assertEqual(len(sent), 1)
-        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
+        self.assertIn("아직 Claude 한도 값을 받은 적이 없습니다", sent[0])
 
     def test_unknown_command_sends_help(self):
         """/status 외 명령에는 사용법 안내를 전송해야 한다."""
@@ -249,7 +251,7 @@ class TestTelegramBotCommands(unittest.TestCase):
             watcher.handle_telegram_command(self._cfg(), self._make_update("/help"), self._make_logger())
 
         self.assertEqual(len(sent), 1)
-        self.assertIn("/status", sent[0])
+        self.assertIn("/status claude", sent[0])
 
     def test_ignores_unknown_chat_id(self):
         """허용되지 않은 chat_id에서 온 명령은 무시해야 한다."""
@@ -258,7 +260,7 @@ class TestTelegramBotCommands(unittest.TestCase):
         with patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(
                 self._cfg(),
-                self._make_update("/status", chat_id="999999999"),
+                self._make_update("/status claude", chat_id="999999999"),
                 self._make_logger(),
             )
 
@@ -270,7 +272,7 @@ class TestTelegramBotCommands(unittest.TestCase):
              patch.object(watcher, "load_state", return_value={}):
             watcher.handle_telegram_command(
                 self._cfg(),
-                self._make_update("/status"),
+                self._make_update("/status claude"),
                 self._make_logger(),
                 dry_run=True,
             )
@@ -337,11 +339,11 @@ class TestUsageCacheStatus(unittest.TestCase):
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(
                 {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"},
-                {"message": {"text": "/status", "chat": {"id": 1}}},
+                {"message": {"text": "/status claude", "chat": {"id": 1}}},
                 self._make_logger(),
             )
 
-        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
+        self.assertIn("아직 Claude 한도 값을 받은 적이 없습니다", sent[0])
         self.assertNotIn("예정 시각:", sent[0])
 
     def test_status_reads_usage_cache_from_temp_file_before_state(self):
@@ -360,7 +362,7 @@ class TestUsageCacheStatus(unittest.TestCase):
                  patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
                 watcher.handle_telegram_command(
                     {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"},
-                    {"message": {"text": "/status", "chat": {"id": 1}}},
+                    {"message": {"text": "/status claude", "chat": {"id": 1}}},
                     self._make_logger(),
                 )
 
@@ -381,7 +383,7 @@ class TestUsageCacheStatus(unittest.TestCase):
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(
                 {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"},
-                {"message": {"text": "/status", "chat": {"id": 1}}},
+                {"message": {"text": "/status claude", "chat": {"id": 1}}},
                 self._make_logger(),
             )
 
@@ -405,7 +407,7 @@ class TestUsageCacheStatus(unittest.TestCase):
                         "TELEGRAM_CHAT_ID": "1",
                         "CLAUDE_PROJECTS_DIR": str(projects_dir),
                     },
-                    {"message": {"text": "/status", "chat": {"id": 1}}},
+                    {"message": {"text": "/status claude", "chat": {"id": 1}}},
                     self._make_logger(),
                 )
 
@@ -429,7 +431,7 @@ class TestUsageCacheStatus(unittest.TestCase):
                         "CLAUDE_PROJECTS_DIR": str(Path(tmp) / "missing-claude-projects"),
                         "GJC_SESSIONS_DIR": str(Path(tmp) / "gjc-sessions"),
                     },
-                    {"message": {"text": "/status", "chat": {"id": 1}}},
+                    {"message": {"text": "/status claude", "chat": {"id": 1}}},
                     self._make_logger(),
                 )
 
@@ -473,11 +475,11 @@ class TestUsageCacheStatus(unittest.TestCase):
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(
                 {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"},
-                {"message": {"text": "/status", "chat": {"id": 1}}},
+                {"message": {"text": "/status claude", "chat": {"id": 1}}},
                 self._make_logger(),
             )
 
-        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
+        self.assertIn("아직 Claude 한도 값을 받은 적이 없습니다", sent[0])
 
     def test_status_ignores_stale_state_after_near_reset_skip(self):
         """초기화 5분 이하로 dispatch를 건너뛰어도 stale state 노출 금지."""
@@ -487,14 +489,13 @@ class TestUsageCacheStatus(unittest.TestCase):
              patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append(text)):
             watcher.handle_telegram_command(
                 {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"},
-                {"message": {"text": "/status", "chat": {"id": 1}}},
+                {"message": {"text": "/status claude", "chat": {"id": 1}}},
                 self._make_logger(),
             )
 
-        self.assertIn("아직 Claude Code 한도 값을 받은 적이 없습니다", sent[0])
+        self.assertIn("아직 Claude 한도 값을 받은 적이 없습니다", sent[0])
 
     def test_notify_advance_dispatch_sends_reset_and_notify_times(self):
-        """NOTIFY_ADVANCE_SECONDS가 있으면 workflow 입력에 두 시각을 분리해 전달해야 한다."""
         reset_time = datetime(2026, 6, 24, 6, 30, tzinfo=timezone.utc)
         cfg = {
             "GITHUB_TOKEN": "fake-token",
@@ -515,6 +516,35 @@ class TestUsageCacheStatus(unittest.TestCase):
         payload = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
         self.assertEqual(payload["inputs"]["reset_time"], "2026-06-24T15:30:00+09:00")
         self.assertEqual(payload["inputs"]["notify_time"], "2026-06-24T15:20:00+09:00")
+        self.assertEqual(payload["inputs"]["target_label"], "Claude Code 5시간")
+
+    def test_dispatch_sends_custom_target_label(self):
+        reset_time = datetime(2026, 6, 24, 6, 30, tzinfo=timezone.utc)
+        cfg = {
+            "GITHUB_TOKEN": "fake-token",
+            "GITHUB_OWNER": "owner",
+            "GITHUB_REPO": "repo",
+            "GITHUB_REF": "direct-usage",
+        }
+        dispatch_resp = MagicMock()
+        dispatch_resp.status = 204
+        dispatch_resp.__enter__ = lambda s: s
+        dispatch_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch.object(watcher, "_get_pending_runs", return_value=[]), \
+             patch("urllib.request.urlopen", return_value=dispatch_resp) as mock_open:
+            ok = watcher.dispatch_github_workflow(
+                cfg,
+                reset_time,
+                self._make_logger(),
+                dry_run=False,
+                target_label="Codex work 5시간",
+            )
+
+        self.assertTrue(ok)
+        payload = json.loads(mock_open.call_args[0][0].data.decode("utf-8"))
+        self.assertEqual(payload["ref"], "direct-usage")
+        self.assertEqual(payload["inputs"]["target_label"], "Codex work 5시간")
 
     def test_status_line_writer_saves_flat_and_nested_fields(self):
         """statusLine writer가 호환 필드와 rate_limits 원본 필드를 함께 저장해야 한다."""
@@ -540,6 +570,260 @@ class TestUsageCacheStatus(unittest.TestCase):
         self.assertEqual(data["five_hour_used_percentage"], 91)
         self.assertEqual(data["seven_day_used_percentage"], 42)
         self.assertIn("updated_at", data)
+
+
+class TestDirectUsageFetch(unittest.TestCase):
+
+    def _make_logger(self):
+        import logging
+        return logging.getLogger("test")
+
+    def _make_response(self, body: dict, status: int = 200):
+        resp = MagicMock()
+        resp.read.return_value = json.dumps(body).encode()
+        resp.status = status
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    def _jwt(self, payload: dict) -> str:
+        raw = json.dumps(payload).encode()
+        encoded = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        return f"header.{encoded}.signature"
+
+    def test_codex_auth_redacts_token_and_usage_maps_remaining_and_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            auth_path = Path(tmp) / "auth.json"
+            auth_path.write_text(json.dumps({
+                "tokens": {
+                    "id_token": self._jwt({
+                        "email": "me@example.com",
+                        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+                    }),
+                    "access_token": "secret-access-token",
+                    "account_id": "acct_123",
+                }
+            }), encoding="utf-8")
+
+            auth = watcher.read_codex_auth(auth_path)
+            self.assertIsNotNone(auth)
+            self.assertNotIn("secret-access-token", str(auth))
+            self.assertIn("[redacted]", str(auth))
+
+            now = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+            resp = self._make_response({
+                "email": "me@example.com",
+                "plan_type": "plus",
+                "rate_limit": {
+                    "primary_window": {"used_percent": 72.4, "reset_after_seconds": 600},
+                    "secondary_window": {"used_percent": 10, "reset_after_seconds": 3600},
+                },
+            })
+
+            with patch("urllib.request.urlopen", return_value=resp):
+                status = watcher.fetch_codex_usage_status(auth, now, self._make_logger())
+
+        self.assertEqual(status.five_hour_remaining_percentage, 28)
+        self.assertEqual(status.seven_day_remaining_percentage, 90)
+        self.assertEqual(status.five_hour_reset, now + timedelta(seconds=600))
+        self.assertEqual(status.source, "codex")
+
+    def test_claude_usage_response_maps_utilization_and_reset(self):
+        five_dt = datetime.now(timezone.utc) + timedelta(hours=1)
+        seven_dt = datetime.now(timezone.utc) + timedelta(days=7)
+        resp = self._make_response({
+            "five_hour": {"utilization": 81.5, "resets_at": five_dt.isoformat()},
+            "seven_day": {"utilization": 41, "resets_at": seven_dt.isoformat()},
+        })
+        credentials = watcher.ClaudeCredentials("claude-token", None, None, ("user:profile",))
+
+        with patch("urllib.request.urlopen", return_value=resp):
+            status = watcher.fetch_claude_usage_status(credentials, self._make_logger())
+
+        self.assertEqual(status.five_hour_used_percentage, 81.5)
+        self.assertEqual(status.seven_day_used_percentage, 41)
+        self.assertAlmostEqual(status.five_hour_reset.timestamp(), five_dt.timestamp(), delta=1)
+        self.assertEqual(status.source, "claude")
+
+    def test_direct_api_failure_falls_back_to_usage_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            auth_path = Path(tmp) / "auth.json"
+            usage_path = Path(tmp) / "usage.json"
+            future = datetime.now(timezone.utc) + timedelta(hours=2)
+            auth_path.write_text(json.dumps({
+                "tokens": {
+                    "access_token": "secret-access-token",
+                    "account_id": "acct_123",
+                }
+            }), encoding="utf-8")
+            usage_path.write_text(json.dumps({
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "five_hour_resets_at": future.timestamp(),
+            }), encoding="utf-8")
+
+            with patch.object(watcher, "USAGE_FILE", usage_path), \
+                 patch("urllib.request.urlopen", side_effect=urllib.error.URLError("down")):
+                status = watcher.get_current_limit_status({
+                    "CODEX_AUTH_JSON": str(auth_path),
+                    "CLAUDE_USAGE_CREDENTIALS": str(Path(tmp) / "missing-claude.json"),
+                    "CLAUDE_PROJECTS_DIR": str(Path(tmp) / "missing-projects"),
+                    "GJC_SESSIONS_DIR": str(Path(tmp) / "missing-sessions"),
+                })
+
+        self.assertEqual(status.source, "cache")
+        self.assertAlmostEqual(status.five_hour_reset.timestamp(), future.timestamp(), delta=1)
+
+    def test_status_distinguishes_provider_windows(self):
+        now = datetime.now(timezone.utc)
+        status = watcher.LimitStatus(
+            five_hour_reset=now + timedelta(hours=1),
+            provider_windows=(
+                watcher.ProviderWindow(
+                    provider="codex",
+                    label="Codex",
+                    window="five_hour",
+                    reset=now + timedelta(hours=1),
+                    remaining_percentage=37,
+                    used_percentage=None,
+                    estimated=False,
+                ),
+                watcher.ProviderWindow(
+                    provider="claude",
+                    label="Claude",
+                    window="seven_day",
+                    reset=now + timedelta(days=2),
+                    remaining_percentage=None,
+                    used_percentage=42,
+                    estimated=False,
+                ),
+            ),
+            source="direct",
+        )
+
+        reply = watcher.format_limit_status_reply(status)
+
+        self.assertIn("Codex 5시간", reply)
+        self.assertIn("남은 비율: 37%", reply)
+        self.assertIn("Claude 7일", reply)
+        self.assertIn("사용 비율: 42%", reply)
+
+    def test_codex_profiles_fetches_every_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profiles_dir = Path(tmp) / "profiles"
+            for name in ("work", "personal"):
+                profile_dir = profiles_dir / name
+                profile_dir.mkdir(parents=True)
+                (profile_dir / "auth.json").write_text(json.dumps({
+                    "tokens": {
+                        "id_token": self._jwt({"email": f"{name}@example.com"}),
+                        "access_token": f"{name}-token",
+                        "account_id": f"acct-{name}",
+                    }
+                }), encoding="utf-8")
+
+            responses = [
+                self._make_response({
+                    "rate_limit": {
+                        "primary_window": {"used_percent": 25, "reset_after_seconds": 600},
+                    }
+                }),
+                self._make_response({
+                    "rate_limit": {
+                        "primary_window": {"used_percent": 80, "reset_after_seconds": 1200},
+                    }
+                }),
+            ]
+
+            with patch("urllib.request.urlopen", side_effect=responses):
+                status = watcher.fetch_direct_usage_status({
+                    "CODEX_PROFILES_DIR": str(profiles_dir),
+                    "CLAUDE_USAGE_CREDENTIALS": str(Path(tmp) / "missing-claude.json"),
+                }, self._make_logger())
+
+        codex_windows = [w for w in status.provider_windows if w.provider == "codex"]
+        self.assertEqual([w.profile for w in codex_windows], ["personal", "work"])
+        self.assertEqual([w.remaining_percentage for w in codex_windows], [75, 20])
+
+    def test_run_once_schedules_each_provider_window_independently(self):
+        now = datetime.now(timezone.utc)
+        windows = (
+            watcher.ProviderWindow(
+                provider="codex",
+                label="Codex work",
+                window="five_hour",
+                reset=now + timedelta(hours=1),
+                profile="work",
+            ),
+            watcher.ProviderWindow(
+                provider="codex",
+                label="Codex personal",
+                window="five_hour",
+                reset=now + timedelta(hours=2),
+                profile="personal",
+            ),
+            watcher.ProviderWindow(
+                provider="claude",
+                label="Claude",
+                window="five_hour",
+                reset=now + timedelta(hours=3),
+            ),
+        )
+        status = watcher.LimitStatus(five_hour_reset=windows[0].reset, source="direct", provider_windows=windows)
+        dispatched = []
+        state = {}
+
+        with patch.object(watcher, "get_current_limit_status", return_value=status), \
+             patch.object(watcher, "load_state", return_value=state), \
+             patch.object(watcher, "save_state", side_effect=lambda new_state: state.update(new_state)), \
+             patch.object(watcher, "dispatch_github_workflow", side_effect=lambda cfg, reset, logger, dry_run=False, target_label="": dispatched.append((reset, target_label)) or True):
+            watcher.run_once({}, self._make_logger(), dry_run=False)
+
+        self.assertEqual(len(dispatched), 3)
+        self.assertEqual(
+            [label for _, label in dispatched],
+            ["Codex work 5시간", "Codex personal 5시간", "Claude 5시간"],
+        )
+        self.assertIn("scheduled_resets", state)
+        self.assertEqual(len(state["scheduled_resets"]), 3)
+
+    def test_status_command_sends_provider_choice_and_text_fallback(self):
+        sent = []
+        now = datetime.now(timezone.utc)
+        status = watcher.LimitStatus(
+            five_hour_reset=now + timedelta(hours=1),
+            provider_windows=(
+                watcher.ProviderWindow("codex", "Codex work", "five_hour", now + timedelta(hours=1), profile="work"),
+                watcher.ProviderWindow("claude", "Claude", "five_hour", now + timedelta(hours=2)),
+            ),
+            source="direct",
+        )
+
+        with patch.object(watcher, "get_current_limit_status", return_value=status), \
+             patch.object(watcher, "send_telegram_message", side_effect=lambda cfg, text, logger, **kw: sent.append((text, kw))):
+            cfg = {"TELEGRAM_BOT_TOKEN": "fake", "TELEGRAM_CHAT_ID": "1"}
+            watcher.handle_telegram_command(cfg, {"message": {"text": "/status", "chat": {"id": 1}}}, self._make_logger())
+            watcher.handle_telegram_command(cfg, {"message": {"text": "/status codex", "chat": {"id": 1}}}, self._make_logger())
+            watcher.handle_telegram_command(cfg, {"callback_query": {"data": "status:claude", "message": {"chat": {"id": 1}}}}, self._make_logger())
+
+        self.assertIn("선택", sent[0][0])
+        self.assertIn("reply_markup", sent[0][1])
+        self.assertIn("Codex work", sent[1][0])
+        self.assertNotIn("Claude", sent[1][0])
+        self.assertIn("Claude", sent[2][0])
+        self.assertNotIn("Codex work", sent[2][0])
+
+
+class TestWorkflowDefinition(unittest.TestCase):
+
+    def test_workflow_keeps_provider_labels_independent(self):
+        workflow = (Path(__file__).parent.parent / ".github" / "workflows" / "token-reset-notify.yml").read_text(encoding="utf-8")
+
+        self.assertIn("target_label:", workflow)
+        self.assertIn("group: token-reset-notify-${{ inputs.target_label", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertNotIn("cancel-in-progress: true", workflow)
+        self.assertIn("TARGET_LABEL", workflow)
+        self.assertIn("${{ inputs.target_label", workflow)
 
 
 if __name__ == "__main__":
