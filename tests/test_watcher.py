@@ -824,6 +824,12 @@ class TestWorkflowDefinition(unittest.TestCase):
         self.assertNotIn("cancel-in-progress: true", workflow)
         self.assertIn("TARGET_LABEL", workflow)
         self.assertIn("${{ inputs.target_label", workflow)
+        self.assertIn("actions/checkout@v4", workflow)
+        self.assertIn("sendPhoto", workflow)
+        self.assertIn("assets/telegram/codex.png", workflow)
+        self.assertIn("assets/telegram/claudecode.png", workflow)
+        self.assertIn("토큰 초기화 완료", workflow)
+        self.assertNotIn("완료 예정", workflow)
 
 
 if __name__ == "__main__":

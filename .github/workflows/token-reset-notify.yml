@@ -32,6 +32,8 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: 초기화 시각까지 대기
         id: wait
         env:
@@ -75,17 +77,20 @@ jobs:
           NOTIFY_KST=$(TZ=Asia/Seoul date -d "$NOTIFY_TIME" "+%Y-%m-%d %H:%M KST" 2>/dev/null || echo "$NOTIFY_TIME")
           TARGET_LABEL_HTML=$(printf '%s' "$TARGET_LABEL" | python3 -c 'import html,sys; print(html.escape(sys.stdin.read()))')
 
-          MESSAGE=$'🔔 <b>'"${TARGET_LABEL_HTML}"$' 토큰 초기화 완료 예정</b>\n──────────────────\n• 초기화 시각: <code>'"${RESET_KST}"$'</code>\n• 알림 전송: <code>'"${NOTIFY_KST}"$'</code>\n\n<i>token_alert by GitHub Actions</i>'
+          case "$TARGET_LABEL" in
+            *Codex*) ICON_PATH="assets/telegram/codex.png" ;;
+            *Claude*) ICON_PATH="assets/telegram/claudecode.png" ;;
+            *) ICON_PATH="assets/telegram/claudecode.png" ;;
+          esac
 
-          # URL 인코딩 없이 JSON 으로 전송
+          MESSAGE=$'🔔 <b>'"${TARGET_LABEL_HTML}"$' 토큰 초기화 완료</b>\n──────────────────\n• 초기화 시각: <code>'"${RESET_KST}"$'</code>\n• 알림 전송: <code>'"${NOTIFY_KST}"$'</code>\n\n<i>token_alert by GitHub Actions</i>'
+
           curl -s -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
-              \"text\": $(echo "$MESSAGE" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
-              \"parse_mode\": \"HTML\"
-            }" | python3 -c "
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto" \
+            -F "chat_id=${TELEGRAM_CHAT_ID}" \
+            -F "photo=@${ICON_PATH}" \
+            -F "caption=${MESSAGE}" \
+            -F "parse_mode=HTML" | python3 -c "
           import json, sys
           r = json.load(sys.stdin)
           if r.get('ok'):
