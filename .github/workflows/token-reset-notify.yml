@@ -73,16 +73,28 @@ jobs:
           # KST 표시 (입력값이 이미 +09:00 기준)
           RESET_KST=$(TZ=Asia/Seoul date -d "$RESET_TIME" "+%Y-%m-%d %H:%M KST" 2>/dev/null || echo "$RESET_TIME")
 
-          NOTIFY_KST=$(TZ=Asia/Seoul date -d "$NOTIFY_TIME" "+%Y-%m-%d %H:%M KST" 2>/dev/null || echo "$NOTIFY_TIME")
-          TARGET_LABEL_HTML=$(printf '%s' "$TARGET_LABEL" | python3 -c 'import html,sys; print(html.escape(sys.stdin.read()))')
-
+          PROVIDER="Claude"
+          ACCOUNT=""
+          WINDOW="5시간"
           case "$TARGET_LABEL" in
-            *Codex*) ICON_PREFIX="🤖" ;;
-            *Claude*) ICON_PREFIX="🧠" ;;
-            *) ICON_PREFIX="🔔" ;;
+            Codex\ *\ 7일) PROVIDER="Codex"; ACCOUNT="${TARGET_LABEL#Codex }"; ACCOUNT="${ACCOUNT% 7일}"; WINDOW="7일" ;;
+            Codex\ *\ 5시간) PROVIDER="Codex"; ACCOUNT="${TARGET_LABEL#Codex }"; ACCOUNT="${ACCOUNT% 5시간}"; WINDOW="5시간" ;;
+            Claude\ *7일*) PROVIDER="Claude"; WINDOW="7일" ;;
+            Claude\ *5시간*) PROVIDER="Claude"; WINDOW="5시간" ;;
           esac
 
-          MESSAGE=$''"${ICON_PREFIX}"$' <b>'"${TARGET_LABEL_HTML}"$' 토큰 초기화 완료</b>\n──────────────────\n• 초기화 시각: <code>'"${RESET_KST}"$'</code>\n• 알림 전송: <code>'"${NOTIFY_KST}"$'</code>\n\n<i>token_alert by GitHub Actions</i>'
+          ACCOUNT_HTML=$(printf '%s' "$ACCOUNT" | python3 -c 'import html,sys; print(html.escape(sys.stdin.read()))')
+          if [ "$WINDOW" = "7일" ]; then
+            WINDOW_LINE="📅 7일 한도 초기화됨"
+          else
+            WINDOW_LINE="⚡ 5시간 한도 초기화됨"
+          fi
+
+          if [ "$PROVIDER" = "Codex" ]; then
+            MESSAGE=$'🤖 <b>Codex 초기화 완료</b>\n\n계정: '"${ACCOUNT_HTML}"$'\n\n'"${WINDOW_LINE}"$'\n• <code>'"${RESET_KST}"$'</code>'
+          else
+            MESSAGE=$'🧠 <b>Claude 초기화 완료</b>\n\n'"${WINDOW_LINE}"$'\n• <code>'"${RESET_KST}"$'</code>'
+          fi
 
           curl -s -X POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \

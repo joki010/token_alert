@@ -825,12 +825,20 @@ class TestWorkflowDefinition(unittest.TestCase):
         self.assertIn("TARGET_LABEL", workflow)
         self.assertIn("${{ inputs.target_label", workflow)
         self.assertIn("sendMessage", workflow)
-        self.assertIn("ICON_PREFIX=\"🤖\"", workflow)
-        self.assertIn("ICON_PREFIX=\"🧠\"", workflow)
+        self.assertIn("PROVIDER=\"Claude\"", workflow)
+        self.assertIn("ACCOUNT=\"${TARGET_LABEL#Codex }\"", workflow)
+        self.assertIn("🤖 <b>Codex 초기화 완료</b>", workflow)
+        self.assertIn("🧠 <b>Claude 초기화 완료</b>", workflow)
+        self.assertIn("계정: ", workflow)
+        self.assertIn("⚡ 5시간 한도 초기화됨", workflow)
+        self.assertIn("📅 7일 한도 초기화됨", workflow)
+        self.assertIn("• <code>", workflow)
         self.assertNotIn("sendPhoto", workflow)
         self.assertNotIn("assets/telegram/", workflow)
-        self.assertIn("토큰 초기화 완료", workflow)
+        self.assertIn("Codex 초기화 완료", workflow)
+        self.assertIn("Claude 초기화 완료", workflow)
         self.assertNotIn("완료 예정", workflow)
+        self.assertNotIn("알림 전송:", workflow)
 
 
 if __name__ == "__main__":
