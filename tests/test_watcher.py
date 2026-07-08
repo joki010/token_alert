@@ -702,9 +702,12 @@ class TestDirectUsageFetch(unittest.TestCase):
 
         reply = watcher.format_limit_status_reply(status)
 
-        self.assertIn("Codex 5시간", reply)
+        self.assertIn("🤖 <b>Codex</b>", reply)
+        self.assertIn("계정: <code>default</code>", reply)
+        self.assertIn("⚡ <b>5시간 한도</b>", reply)
         self.assertIn("남은 비율: 37%", reply)
-        self.assertIn("Claude 7일", reply)
+        self.assertIn("🧠 <b>Claude</b>", reply)
+        self.assertIn("📅 <b>7일 한도</b>", reply)
         self.assertIn("사용 비율: 42%", reply)
 
     def test_codex_profiles_fetches_every_profile(self):
@@ -807,7 +810,8 @@ class TestDirectUsageFetch(unittest.TestCase):
 
         self.assertIn("선택", sent[0][0])
         self.assertIn("reply_markup", sent[0][1])
-        self.assertIn("Codex work", sent[1][0])
+        self.assertIn("🤖 <b>Codex 남은 시간</b>", sent[1][0])
+        self.assertIn("계정: <code>work</code>", sent[1][0])
         self.assertNotIn("Claude", sent[1][0])
         self.assertIn("Claude", sent[2][0])
         self.assertNotIn("Codex work", sent[2][0])

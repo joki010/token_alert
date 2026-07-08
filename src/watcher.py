@@ -18,6 +18,7 @@ import sys
 import time
 import glob
 import base64
+import html
 import logging
 import argparse
 import threading
@@ -1084,9 +1085,38 @@ def _format_remaining(reset_dt: datetime, now: datetime) -> str:
 def _window_title(window: ProviderWindow) -> str:
     name = "5시간" if window.window == "five_hour" else "7일"
     return f"{window.label} {name} 한도"
+def _provider_icon(provider: str) -> str:
+    if provider == "codex":
+        return "🤖"
+    if provider == "claude":
+        return "🧠"
+    return "⏳"
 
 
-def _format_provider_window(window: ProviderWindow, now: datetime) -> str:
+def _window_icon(window: str) -> str:
+    return "📅" if window == "seven_day" else "⚡"
+
+
+def _window_name(window: str) -> str:
+    return "7일" if window == "seven_day" else "5시간"
+
+
+def _provider_status_prefix(windows: tuple[ProviderWindow, ...]) -> str:
+    providers = {window.provider for window in windows}
+    if providers == {"codex"}:
+        return "🤖 <b>Codex 남은 시간</b>\n──────────────────"
+    if providers == {"claude"}:
+        return "🧠 <b>Claude 남은 시간</b>\n──────────────────"
+    return "⏳ <b>토큰 한도 현황</b>\n──────────────────"
+
+
+def _codex_account_label(window: ProviderWindow) -> str:
+    return window.profile or window.account or "default"
+
+
+
+
+def _format_window_detail(window: ProviderWindow, now: datetime) -> str:
     KST = timezone(timedelta(hours=9))
     reset = window.reset
     if reset is None:
@@ -1097,13 +1127,41 @@ def _format_provider_window(window: ProviderWindow, now: datetime) -> str:
         metric = f"\n• 남은 비율: {window.remaining_percentage:g}%"
     elif window.used_percentage is not None:
         metric = f"\n• 사용 비율: {window.used_percentage:g}%"
-    estimate = " (추정)" if window.estimated else ""
     return (
-        f"<b>{_window_title(window)}</b>{estimate}\n"
+        f"{_window_icon(window.window)} <b>{_window_name(window.window)} 한도</b>\n"
         f"• 남은 시간: <b>{_format_remaining(reset, now)}</b>"
         f"{metric}\n"
-        f"• 초기화 시각: <code>{reset_kst}</code>"
+        f"• 초기화: <code>{reset_kst}</code>"
     )
+
+
+def _format_grouped_provider_windows(windows: tuple[ProviderWindow, ...], now: datetime) -> list[str]:
+    providers = {window.provider for window in windows}
+    if providers == {"codex"}:
+        grouped: dict[str, list[ProviderWindow]] = {}
+        for window in windows:
+            grouped.setdefault(_codex_account_label(window), []).append(window)
+        return [
+            f"🤖 <b>Codex</b>\n계정: <code>{html.escape(account)}</code>\n\n" +
+            "\n\n".join(detail for detail in (_format_window_detail(window, now) for window in account_windows) if detail)
+            for account, account_windows in grouped.items()
+        ]
+    if providers == {"claude"}:
+        return [detail for detail in (_format_window_detail(window, now) for window in windows) if detail]
+    return [_format_provider_window(window, now) for window in windows]
+
+def _format_provider_window(window: ProviderWindow, now: datetime) -> str:
+    estimate = " (추정)" if window.estimated else ""
+    provider_icon = _provider_icon(window.provider)
+    if window.provider == "codex":
+        account = html.escape(_codex_account_label(window))
+        title = f"{provider_icon} <b>Codex</b>{estimate}\n계정: <code>{account}</code>"
+    elif window.provider == "claude":
+        title = f"{provider_icon} <b>Claude</b>{estimate}"
+    else:
+        title = f"{provider_icon} <b>{html.escape(window.label)}</b>{estimate}"
+    detail = _format_window_detail(window, now)
+    return f"{title}\n\n{detail}" if detail else ""
 
 
 def format_limit_status_reply(status: LimitStatus) -> str:
@@ -1112,9 +1170,9 @@ def format_limit_status_reply(status: LimitStatus) -> str:
     lines = []
 
     if status.provider_windows:
-        lines = [line for line in (_format_provider_window(window, now) for window in status.provider_windows) if line]
+        lines = [line for line in _format_grouped_provider_windows(status.provider_windows, now) if line]
         if lines:
-            prefix = "⏳ <b>토큰 한도 현황</b>\n──────────────────"
+            prefix = _provider_status_prefix(status.provider_windows)
             suffix = "\n\n(JSONL 로그 기반 추정값)" if status.estimated else ""
             return f"{prefix}\n" + "\n\n".join(lines) + "\n──────────────────" + suffix
 
