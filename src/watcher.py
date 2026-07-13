@@ -359,19 +359,32 @@ def read_codex_auth(auth_path: Path) -> CodexAuthSummary | None:
     )
 
 
+CODEX_SEVEN_DAY_WINDOW_SECONDS_MIN = 21600  # 6시간 이상이면 7일(주간) 창으로 간주
+
+
+def _classify_codex_window_kind(data: dict, default_kind: str) -> str:
+    """`limit_window_seconds`(응답에 실제로 들어있는 창 길이)로 5시간/7일을 판별한다.
+
+    OpenAI 응답의 `primary_window`/`secondary_window`는 위치가 고정되어 있지 않다
+    (계정에 따라 5시간 창이 없으면 주간 창이 `primary_window` 자리에 온다).
+    응답에 `limit_window_seconds`가 없으면 위치 기반 기본값(`default_kind`)을 쓴다.
+    """
+    window_seconds = _num_value(data, "limit_window_seconds") or _num_value(data, "limitWindowSeconds")
+    if window_seconds is None:
+        return default_kind
+    return "seven_day" if window_seconds >= CODEX_SEVEN_DAY_WINDOW_SECONDS_MIN else "five_hour"
+
+
 def _codex_window(
-    rate: dict | None,
-    window: str,
-    label: str,
+    data: dict | None,
+    default_kind: str,
     now: datetime,
     profile: str | None = None,
     account: str | None = None,
 ) -> ProviderWindow | None:
-    key = "primary_window" if window == "five_hour" else "secondary_window"
-    camel_key = "primaryWindow" if window == "five_hour" else "secondaryWindow"
-    data = _dict_value(rate, key) or _dict_value(rate, camel_key)
     if data is None:
         return None
+    window = _classify_codex_window_kind(data, default_kind)
     used = max(0.0, min(100.0, _num_value(data, "used_percent") or _num_value(data, "usedPercent") or 0.0))
     reset_after = _num_value(data, "reset_after_seconds") or _num_value(data, "resetAfterSeconds")
     reset = now + timedelta(seconds=reset_after) if reset_after is not None and reset_after > 0 else None
@@ -427,10 +440,12 @@ def fetch_codex_usage_status(
     if data is None:
         return LimitStatus()
     rate = _dict_value(data, "rate_limit") or _dict_value(data, "rateLimit")
+    primary = _dict_value(rate, "primary_window") or _dict_value(rate, "primaryWindow")
+    secondary = _dict_value(rate, "secondary_window") or _dict_value(rate, "secondaryWindow")
     windows = tuple(
         window for window in (
-            _codex_window(rate, "five_hour", "5시간", now, profile, auth.email or auth.account_id),
-            _codex_window(rate, "seven_day", "7일", now, profile, auth.email or auth.account_id),
+            _codex_window(primary, "five_hour", now, profile, auth.email or auth.account_id),
+            _codex_window(secondary, "seven_day", now, profile, auth.email or auth.account_id),
         )
         if window is not None and window.reset is not None
     )
