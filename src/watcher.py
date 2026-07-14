@@ -1070,6 +1070,33 @@ def send_telegram_message(
         logger.warning(f"텔레그램 전송 오류: {e}")
 
 
+def set_telegram_commands(cfg: dict, logger: logging.Logger) -> None:
+    """텔레그램 봇 메뉴에 슬래시 커맨드 목록을 등록한다."""
+    token = cfg.get("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        return
+
+    commands = [
+        {"command": "status", "description": "공급자 선택 후 초기화 조회"},
+        {"command": "claude", "description": "Claude 초기화 바로 조회"},
+        {"command": "codex", "description": "Codex 초기화 바로 조회"},
+    ]
+    payload = json.dumps({"commands": commands}).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/setMyCommands",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+            if not result.get("ok"):
+                logger.warning(f"텔레그램 커맨드 메뉴 등록 실패: {result}")
+    except (urllib.error.URLError, json.JSONDecodeError) as e:
+        logger.warning(f"텔레그램 커맨드 메뉴 등록 오류: {e}")
+
+
 def get_telegram_updates(cfg: dict, offset: int, logger: logging.Logger) -> list:
     """getUpdates long polling으로 텔레그램 업데이트 목록을 가져온다."""
     token = cfg.get("TELEGRAM_BOT_TOKEN", "")
@@ -1379,8 +1406,21 @@ def handle_telegram_command(cfg: dict, update: dict, logger: logging.Logger, dry
             reply = "조회할 공급자를 선택하세요.\n텍스트로는 /status codex 또는 /status claude 를 사용할 수 있습니다."
             send_telegram_message(cfg, reply, logger, dry_run=dry_run, reply_markup=_provider_choice_markup())
 
+    elif command in ("/claude", "/codex"):
+        provider = command[1:]
+        reply = _provider_status_reply(cfg, provider)
+        logger.info(f"[BOT] {command} 응답: {reply[:60]}")
+        send_telegram_message(cfg, reply, logger, dry_run=dry_run)
+
     elif command.startswith("/"):
-        reply = "사용 가능한 명령:\n/status — 공급자 선택\n/status codex — Codex 초기화 조회\n/status claude — Claude 초기화 조회"
+        reply = (
+            "사용 가능한 명령:\n"
+            "/status — 공급자 선택\n"
+            "/status codex — Codex 초기화 조회\n"
+            "/status claude — Claude 초기화 조회\n"
+            "/codex — Codex 초기화 바로 조회\n"
+            "/claude — Claude 초기화 바로 조회"
+        )
         send_telegram_message(cfg, reply, logger, dry_run=dry_run)
 
 
@@ -1390,7 +1430,8 @@ def run_telegram_polling(cfg: dict, logger: logging.Logger, dry_run: bool = Fals
         logger.warning("TELEGRAM_BOT_TOKEN 미설정 — 텔레그램 polling 비활성화")
         return
 
-    logger.info("텔레그램 봇 polling 시작 (/status 명령 대기 중)")
+    logger.info("텔레그램 봇 polling 시작 (/status, /claude, /codex 명령 대기 중)")
+    set_telegram_commands(cfg, logger)
     offset = 0
     while True:
         try:
