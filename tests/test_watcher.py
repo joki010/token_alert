@@ -642,6 +642,8 @@ class TestDirectUsageFetch(unittest.TestCase):
 
         self.assertEqual(status.five_hour_used_percentage, 81.5)
         self.assertEqual(status.seven_day_used_percentage, 41)
+        self.assertEqual(status.five_hour_remaining_percentage, round(100 - 81.5))
+        self.assertEqual(status.seven_day_remaining_percentage, round(100 - 41))
         self.assertAlmostEqual(status.five_hour_reset.timestamp(), five_dt.timestamp(), delta=1)
         self.assertEqual(status.source, "claude")
 

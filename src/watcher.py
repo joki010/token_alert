@@ -556,6 +556,7 @@ def _claude_window(data: dict, window: str) -> ProviderWindow | None:
         label="Claude",
         window=window,
         reset=reset,
+        remaining_percentage=round(100 - used) if used is not None else None,
         used_percentage=used,
     )
 
@@ -1203,7 +1204,7 @@ def format_limit_status_reply(status: LimitStatus) -> str:
     if status.five_hour_reset is not None:
         reset_kst = status.five_hour_reset.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
         usage_val = status.five_hour_used_percentage
-        usage = "" if usage_val is None else f"\n• 사용 비율: {usage_val:g}%"
+        usage = "" if usage_val is None else f"\n• 남은 비율: {round(100 - usage_val):g}%"
         lines.append(
             f"⚡ <b>5시간 단기 한도</b>\n"
             f"• 남은 시간: <b>{_format_remaining(status.five_hour_reset, now)}</b>"
@@ -1214,7 +1215,7 @@ def format_limit_status_reply(status: LimitStatus) -> str:
     if status.seven_day_reset is not None:
         reset_kst = status.seven_day_reset.astimezone(KST).strftime("%Y-%m-%d %H:%M KST")
         usage_val = status.seven_day_used_percentage
-        usage = "" if usage_val is None else f"\n• 사용 비율: {usage_val:g}%"
+        usage = "" if usage_val is None else f"\n• 남은 비율: {round(100 - usage_val):g}%"
         lines.append(
             f"📅 <b>7일 장기 한도</b>\n"
             f"• 남은 시간: <b>{_format_remaining(status.seven_day_reset, now)}</b>"
