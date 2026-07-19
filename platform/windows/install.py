@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import subprocess
+import tempfile
 import winreg
 from pathlib import Path
 
@@ -32,6 +33,7 @@ INSTALLED_WATCHER_PY = INSTALL_LIB_DIR / "watcher.py"
 INSTALLED_CONFIG_DIR = Path.home() / ".config" / "token-alert"
 INSTALLED_CONFIG_ENV = INSTALLED_CONFIG_DIR / "config.env"
 TRAY_EXE_DEST = INSTALL_DIR / "TokenAlertTray.exe"
+RUNTIME_MODULE_NAMES = ("watcher.py", "atomic_json.py", "activation.py", "scheduling.py")
 
 
 def banner(msg: str) -> None:
@@ -127,11 +129,42 @@ def check_config() -> None:
     print("✅ config.env 유효성 확인 완료")
 
 
+def runtime_manifest() -> tuple[tuple[Path, Path], ...]:
+    """설치할 공통 런타임 모듈의 명시적 매니페스트를 반환합니다."""
+    return tuple(
+        (SCRIPT_ROOT / "src" / name, INSTALL_LIB_DIR / name)
+        for name in RUNTIME_MODULE_NAMES
+    )
+
+
+def _atomic_copy(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=str(destination.parent),
+    )
+    os.close(file_descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        shutil.copy2(source, temporary_path)
+        os.replace(temporary_path, destination)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
 def install_watcher_files() -> None:
-    """watcher.py와 config.env를 고정 위치에 복사합니다."""
+    """네 공통 런타임 모듈과 config.env를 고정 위치에 복사합니다."""
+    manifest = runtime_manifest()
+    missing = [source for source, _ in manifest if not source.is_file()]
+    if missing:
+        raise FileNotFoundError(f"필수 런타임 모듈이 없습니다: {', '.join(str(path) for path in missing)}")
+
     INSTALL_LIB_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(WATCHER_PY), str(INSTALLED_WATCHER_PY))
-    print(f"✅ watcher.py 설치: {INSTALLED_WATCHER_PY}")
+    for source, destination in manifest:
+        _atomic_copy(source, destination)
+        print(f"✅ 런타임 모듈 설치: {destination}")
 
     if CONFIG_ENV.exists():
         INSTALLED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)

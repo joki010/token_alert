@@ -879,6 +879,8 @@ class TestWorkflowDefinition(unittest.TestCase):
         self.assertIn("Claude 초기화 완료", workflow)
         self.assertNotIn("완료 예정", workflow)
         self.assertNotIn("알림 전송:", workflow)
+        self.assertIn("RESET_DIFF", workflow)
+        self.assertIn('if [ "$RESET_DIFF" -gt 21600 ]', workflow)
 
 
 if __name__ == "__main__":

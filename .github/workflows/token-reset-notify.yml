@@ -51,6 +51,19 @@ jobs:
           fi
 
           DIFF=$((TARGET - NOW))
+          RESET_TARGET=$(date -d "$RESET_TIME" +%s 2>/dev/null || echo "0")
+
+          if [ "$RESET_TARGET" = "0" ]; then
+            echo "⚠️  초기화 시각 파싱 실패: $RESET_TIME"
+            exit 1
+          fi
+
+          RESET_DIFF=$((RESET_TARGET - NOW))
+          if [ "$RESET_DIFF" -gt 21600 ]; then
+            echo "⚠️  초기화 시각이 6시간 범위를 초과했습니다: ${RESET_DIFF}초"
+            exit 1
+          fi
+
           echo "reset_time=$RESET_TIME" >> $GITHUB_OUTPUT
           echo "notify_time=$NOTIFY_TIME" >> $GITHUB_OUTPUT
 

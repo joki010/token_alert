@@ -7,9 +7,9 @@ token_alert 설치 스크립트 (macOS)
 
 import os
 import shutil
-import stat
 import sys
 import subprocess
+import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.parent.parent.resolve()  # token_alert 루트
@@ -38,6 +38,7 @@ STDOUT_LOG = LOG_DIR / "token_alert.log"
 STDERR_LOG = LOG_DIR / "token_alert_error.log"
 TRAY_STDOUT_LOG = LOG_DIR / "token_alert_tray.log"
 TRAY_STDERR_LOG = LOG_DIR / "token_alert_tray_error.log"
+RUNTIME_MODULE_NAMES = ("watcher.py", "atomic_json.py", "activation.py", "scheduling.py")
 
 
 def banner(msg: str) -> None:
@@ -111,20 +112,141 @@ def check_config() -> None:
     print("✅ config.env 유효성 확인 완료")
 
 
-def install_watcher_files() -> None:
-    """watcher.py와 config.env를 고정 위치에 복사합니다."""
-    INSTALL_LIB_DIR.mkdir(parents=True, exist_ok=True)
-    import shutil as _shutil
-    _shutil.copy2(str(WATCHER_PY), str(INSTALLED_WATCHER_PY))
-    print(f"✅ watcher.py 설치: {INSTALLED_WATCHER_PY}")
+def runtime_manifest() -> tuple[tuple[Path, Path], ...]:
+    """설치할 공통 런타임 모듈의 명시적 매니페스트를 반환합니다."""
+    return tuple(
+        (SCRIPT_DIR / "src" / name, INSTALL_LIB_DIR / name)
+        for name in RUNTIME_MODULE_NAMES
+    )
 
-    if CONFIG_ENV.exists():
-        INSTALLED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        _shutil.copy2(str(CONFIG_ENV), str(INSTALLED_CONFIG_ENV))
+
+def _atomic_copy(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=str(destination.parent),
+    )
+    os.close(file_descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        shutil.copy2(source, temporary_path)
+        os.replace(temporary_path, destination)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _config_value(path: Path, key: str) -> str | None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                current_key, _, value = stripped.partition("=")
+                if current_key.strip() == key and value.strip():
+                    return value.strip()
+    except OSError:
+        return None
+    return None
+
+
+def _absolute_path(value: str) -> str:
+    return str(Path(value.strip()).expanduser().resolve())
+
+
+def _persist_cli_path_if_missing() -> None:
+    installed_value = _config_value(INSTALLED_CONFIG_ENV, "CLAUDE_CLI_PATH")
+    if installed_value:
+        print(f"✅ 기존 CLAUDE_CLI_PATH 보존: {installed_value}")
+        return
+
+    environment_value = os.environ.get("CLAUDE_CLI_PATH", "").strip()
+    if environment_value:
+        cli_path = _absolute_path(environment_value)
+    else:
+        detected = shutil.which("claude")
+        cli_path = _absolute_path(detected) if detected else ""
+
+    if not cli_path:
+        print("⚠️  Claude CLI를 찾지 못했습니다. CLAUDE_CLI_PATH를 직접 설정하세요.")
+        return
+
+    current = ""
+    if INSTALLED_CONFIG_ENV.exists():
+        current = INSTALLED_CONFIG_ENV.read_text(encoding="utf-8")
+    if current and not current.endswith("\n"):
+        current += "\n"
+    current += f"CLAUDE_CLI_PATH={cli_path}\n"
+    _atomic_write_text(INSTALLED_CONFIG_ENV, current)
+    print(f"✅ Claude CLI 경로 저장: {cli_path}")
+
+
+def install_watcher_files() -> None:
+    """공통 런타임과 사용자 설정을 고정 위치에 안전하게 설치합니다."""
+    manifest = runtime_manifest()
+    missing = [source for source, _ in manifest if not source.is_file()]
+    if missing:
+        raise FileNotFoundError(f"필수 런타임 모듈이 없습니다: {', '.join(str(path) for path in missing)}")
+
+    INSTALL_LIB_DIR.mkdir(parents=True, exist_ok=True)
+    for source, destination in manifest:
+        _atomic_copy(source, destination)
+        print(f"✅ 런타임 모듈 설치: {destination}")
+
+    INSTALLED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if INSTALLED_CONFIG_ENV.exists():
+        print(f"ℹ️  기존 config.env 보존: {INSTALLED_CONFIG_ENV}")
+    elif CONFIG_ENV.exists():
+        _atomic_copy(CONFIG_ENV, INSTALLED_CONFIG_ENV)
         INSTALLED_CONFIG_ENV.chmod(0o600)
         print(f"✅ config.env 설치: {INSTALLED_CONFIG_ENV} (권한: 600)")
     else:
-        print("ℹ️  config.env 없음 — 설치 건너뜀 (환경 변수로 대체 가능)")
+        print("ℹ️  config.env 없음 — 환경 변수 전용 설치")
+
+    _persist_cli_path_if_missing()
+
+
+def verify_smoke() -> None:
+    """설치 위치에서 네 런타임 모듈을 불러올 수 있는지 검증합니다."""
+    import_line = "import watcher, atomic_json, activation, scheduling;"
+    command = (
+        "import sys; "
+        f"sys.path.insert(0, {str(INSTALL_LIB_DIR)!r}); "
+        f"{import_line} "
+        "assert watcher and atomic_json and activation and scheduling"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=str(INSTALL_LIB_DIR),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"설치된 런타임 연동 검증 실패: {result.stderr.strip()}")
+    print("✅ 설치된 런타임 연동 검증 완료")
 
 
 def create_plist() -> None:
@@ -356,6 +478,7 @@ def main() -> None:
     check_config()
     banner("파일 설치 (고정 경로)")
     install_watcher_files()
+    verify_smoke()
 
     banner("시작 프로그램 등록")
     registered = ask_startup()

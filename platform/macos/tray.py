@@ -5,9 +5,12 @@ rumps 기반
 """
 
 import os
+import json
 import subprocess
 import sys
+import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import rumps
@@ -29,9 +32,85 @@ TRAY_PLIST_DISABLED = TRAY_PLIST.with_suffix(".plist.disabled")
 ICON = RESOURCES / "claudecode-tray.png"
 ICON_INACTIVE = RESOURCES / "claudecode-tray-inactive.png"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
+POLICY_FILE = Path.home() / ".config" / "token-alert" / "activation-policy.json"
 
 AUTOSAVE_NAME = "TokenAlert"
 UPDATE_INTERVAL = 10
+DEFAULT_POLICY = {"version": 1, "enabled": False}
+
+
+def read_policy() -> dict:
+    try:
+        if not POLICY_FILE.exists():
+            return dict(DEFAULT_POLICY)
+        with POLICY_FILE.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+
+        if not isinstance(data, dict) or set(data) != {"version", "enabled", "enabled_at"}:
+            return dict(DEFAULT_POLICY)
+        if type(data.get("version")) is not int or data["version"] != 1:
+            return dict(DEFAULT_POLICY)
+        if type(data.get("enabled")) is not bool:
+            return dict(DEFAULT_POLICY)
+        enabled_at = data.get("enabled_at")
+        if not isinstance(enabled_at, str):
+            return dict(DEFAULT_POLICY)
+        parsed = datetime.fromisoformat(enabled_at.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+            return dict(DEFAULT_POLICY)
+
+        return {
+            "version": 1,
+            "enabled": data["enabled"],
+            "enabled_at": parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return dict(DEFAULT_POLICY)
+
+
+def write_policy(enabled: bool) -> bool:
+    if type(enabled) is not bool:
+        return False
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    data = {"version": 1, "enabled": enabled, "enabled_at": now_iso}
+    temporary_path = None
+    try:
+        POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{POLICY_FILE.name}.",
+            suffix=".tmp",
+            dir=str(POLICY_FILE.parent),
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            json.dump(data, handle, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, POLICY_FILE)
+
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            directory_fd = os.open(POLICY_FILE.parent, directory_flags)
+        except OSError:
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                try:
+                    os.fsync(directory_fd)
+                except OSError:
+                    pass
+            finally:
+                os.close(directory_fd)
+        return True
+    except OSError:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+        return False
 
 
 def is_watcher_running() -> bool:
@@ -92,13 +171,18 @@ class TokenAlertApp(rumps.App):
 
         self.status_item = rumps.MenuItem("확인 중...")
         self.status_item.set_callback(None)
+
+        self.activation_item = rumps.MenuItem("Claude 자동 창 시작", callback=self.toggle_activation)
+        self.activation_item.state = read_policy().get("enabled", False)
+
         self.toggle_item = rumps.MenuItem("감시 중지", callback=self.toggle_watcher)
         self.login_item = rumps.MenuItem("맥 시작시 실행", callback=self.toggle_login_item)
         self.login_item.state = is_login_item_enabled()
 
         self.menu = [
             self.status_item,
-            None,
+            self.activation_item,
+            rumps.separator,
             self.toggle_item,
             rumps.MenuItem("로그 열기", callback=self.open_log),
             self.login_item,
@@ -139,9 +223,22 @@ class TokenAlertApp(rumps.App):
             self._user_stopped = False
         self._was_running = running
 
+        # update activation state from policy in case it changed externally
+        self.activation_item.state = read_policy().get("enabled", False)
+
     @rumps.timer(UPDATE_INTERVAL)
     def update_status(self, _):
         self._refresh_status()
+
+    def toggle_activation(self, sender):
+        new_state = not sender.state
+        if write_policy(new_state):
+            sender.state = new_state
+        else:
+            rumps.notification(
+                "token_alert", "오류",
+                "정책 파일을 저장할 수 없습니다."
+            )
 
     def toggle_watcher(self, _):
         if is_watcher_running():
@@ -175,12 +272,12 @@ class TokenAlertApp(rumps.App):
 def already_running() -> bool:
     if TRAY_LOCK.exists():
         try:
-            pid = int(TRAY_LOCK.read_text())
+            pid = int(TRAY_LOCK.read_text(encoding="utf-8"))
             subprocess.run(["kill", "-0", str(pid)], capture_output=True, check=True)
             return True
         except (ValueError, subprocess.CalledProcessError):
             pass
-    TRAY_LOCK.write_text(str(os.getpid()))
+    TRAY_LOCK.write_text(str(os.getpid()), encoding="utf-8")
     return False
 
 

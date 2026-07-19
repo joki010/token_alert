@@ -28,6 +28,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from atomic_json import read_json, write_json
+from activation import STATE_CORRUPTION_SENTINEL, activate_claude_reset, handle_parent_termination
+from scheduling import is_scheduleable
+
 # ──────────────────────────────────────────
 # 설정
 # ──────────────────────────────────────────
@@ -38,7 +42,8 @@ PID_FILE = Path.home() / ".token_alert.pid"
 LOG_FILE = Path.home() / ".claude" / "token_alert.log"
 USAGE_FILE = Path.home() / ".claude" / "token_alert_usage.json"
 USAGE_CACHE_MAX_AGE_SECONDS = 6 * 60 * 60
-RESET_ALERT_FORMAT_VERSION = "provider-layout-v2"
+RESET_ALERT_FORMAT_VERSION = "provider-layout-v3-horizon"
+LEGACY_SCHEDULE_FORMAT_KEY = "scheduled_reset_format_version"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_USER_AGENT = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
 CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
@@ -152,6 +157,9 @@ def load_config() -> dict:
         "CODEX_AUTH_JSON",
         "CODEX_PROFILES_DIR",
         "CLAUDE_USAGE_CREDENTIALS",
+        "CLAUDE_CLI_PATH",
+        "CLAUDE_ACTIVATION_PROMPT",
+        "CLAUDE_ACTIVATION_TIMEOUT_SECONDS",
     ]:
         env_val = os.environ.get(key)
         if env_val:
@@ -858,18 +866,23 @@ def release_pid_lock(pid_file: Path = PID_FILE) -> None:
 # 상태 저장/복원
 # ──────────────────────────────────────────
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            with open(STATE_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+    if not STATE_FILE.exists():
+        return {}
+    state = read_json(STATE_FILE, default=None)
+    if isinstance(state, dict):
+        if state.get(STATE_CORRUPTION_SENTINEL) is True:
+            logging.getLogger("token_alert").warning(
+                "상태 파일 손상 표시가 유지되고 있습니다. 파일을 복구하거나 삭제하기 전까지 Claude 자동 창 시작이 비활성화됩니다."
+            )
+        return state
+    logging.getLogger("token_alert").warning(
+        "상태 파일을 읽을 수 없거나 형식이 잘못되었습니다. 손상 표시를 보존하고 Claude 자동 창 시작을 비활성화합니다."
+    )
+    return {STATE_CORRUPTION_SENTINEL: True}
 
 
 def save_state(state: dict) -> None:
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+    write_json(STATE_FILE, state)
 
 
 # ──────────────────────────────────────────
@@ -1340,13 +1353,9 @@ def _schedule_provider_windows(
     for window in status.provider_windows:
         if window.reset is None:
             continue
-        remaining_secs = (window.reset - now).total_seconds()
-        key = _window_state_key(window)
-        if remaining_secs <= 300:
-            if remaining_secs <= 0 and key in scheduled:
-                scheduled.pop(key, None)
-                changed = True
+        if not is_scheduleable(window.reset, now):
             continue
+        key = _window_state_key(window)
 
         reset_iso = _window_reset_iso(window)
         previous = scheduled.get(key)
@@ -1452,58 +1461,72 @@ def run_once(cfg: dict, logger: logging.Logger, dry_run: bool = False) -> None:
     status = get_current_limit_status(cfg)
     if status.provider_windows:
         _schedule_provider_windows(cfg, status, logger, dry_run)
+        claude_resets = [
+            window.reset
+            for window in status.provider_windows
+            if window.provider == "claude"
+            and window.window == "five_hour"
+            and window.reset is not None
+        ]
+        activate_claude_reset(
+            cfg,
+            min(claude_resets) if claude_resets else None,
+            logger,
+            load_state(),
+            save_state,
+            dry_run=dry_run,
+        )
         return
 
     reset_time = status.five_hour_reset
     if reset_time is None:
         logger.debug("초기화 시각 없음 — 알림 예약 불필요")
+        activate_claude_reset(cfg, None, logger, load_state(), save_state, dry_run=dry_run)
         return
     logger.debug(f"{status.source}에서 초기화 시각 읽음: {reset_time.isoformat()}")
     now = datetime.now(timezone.utc)
 
     # 이미 지났거나 너무 임박한 초기화 시각은 무시 (GitHub Actions 지연 고려, 최소 5분)
-    MIN_DISPATCH_SECONDS = 300
-    remaining_secs = (reset_time - now).total_seconds()
-    if remaining_secs <= MIN_DISPATCH_SECONDS:
+    if not is_scheduleable(reset_time, now):
+        remaining_secs = (reset_time - now).total_seconds()
         logger.debug(f"초기화까지 {int(remaining_secs)}초 미만 — dispatch 건너뜀")
+    else:
+        # 이미 같은 시각으로 예약했으면 중복 dispatch 방지 (1분 이내 차이도 건너뜀)
         state = load_state()
-        if "scheduled_reset_time" in state and remaining_secs <= 0:
-            state.pop("scheduled_reset_time", None)
-            save_state(state)
-        return
+        prev_scheduled = state.get("scheduled_reset_time")
+        legacy_format_current = state.get(LEGACY_SCHEDULE_FORMAT_KEY) == RESET_ALERT_FORMAT_VERSION
 
-    # 이미 같은 시각으로 예약했으면 중복 dispatch 방지 (1분 이내 차이도 건너뜀)
-    state = load_state()
-    prev_scheduled = state.get("scheduled_reset_time")
+        KST = timezone(timedelta(hours=9))
+        reset_iso = reset_time.astimezone(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+        if legacy_format_current and prev_scheduled:
+            try:
+                prev_dt = datetime.fromisoformat(prev_scheduled)
+                diff_secs = abs((reset_time - prev_dt).total_seconds())
+                if diff_secs < 60:
+                    logger.debug(f"이미 예약됨 (차이 {int(diff_secs)}초): {prev_scheduled} — 중복 dispatch 건너뜀")
+                    activate_claude_reset(cfg, reset_time, logger, load_state(), save_state, dry_run=dry_run)
+                    return
+            except (TypeError, ValueError):
+                pass
+        if legacy_format_current and prev_scheduled == reset_iso:
+            logger.debug(f"이미 예약됨: {reset_iso} — 중복 dispatch 건너뜀")
+        else:
+            remaining = reset_time - now
 
-    KST = timezone(timedelta(hours=9))
-    reset_iso = reset_time.astimezone(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
-    if prev_scheduled:
-        try:
-            prev_dt = datetime.fromisoformat(prev_scheduled)
-            diff_secs = abs((reset_time - prev_dt).total_seconds())
-            if diff_secs < 60:
-                logger.debug(f"이미 예약됨 (차이 {int(diff_secs)}초): {prev_scheduled} — 중복 dispatch 건너뜀")
-                return
-        except ValueError:
-            pass
-    if prev_scheduled == reset_iso:
-        logger.debug(f"이미 예약됨: {reset_iso} — 중복 dispatch 건너뜀")
-        return
+            logger.info(
+                f"초기화 예정: {reset_iso} (KST) "
+                f"(약 {int(remaining.total_seconds() // 60)}분 후)"
+            )
 
-    remaining = reset_time - now
+            ok = dispatch_github_workflow(cfg, reset_time, logger, dry_run=dry_run)
 
-    logger.info(
-        f"초기화 예정: {reset_iso} (KST) "
-        f"(약 {int(remaining.total_seconds() // 60)}분 후)"
-    )
+            if ok:
+                state["scheduled_reset_time"] = reset_iso
+                state[LEGACY_SCHEDULE_FORMAT_KEY] = RESET_ALERT_FORMAT_VERSION
+                state["dispatched_at"] = now.isoformat()
+                save_state(state)
 
-    ok = dispatch_github_workflow(cfg, reset_time, logger, dry_run=dry_run)
-
-    if ok:
-        state["scheduled_reset_time"] = reset_iso
-        state["dispatched_at"] = now.isoformat()
-        save_state(state)
+    activate_claude_reset(cfg, reset_time, logger, load_state(), save_state, dry_run=dry_run)
 
 
 def main() -> None:
@@ -1534,6 +1557,7 @@ def main() -> None:
     atexit.register(release_pid_lock)
 
     def _handle_signal(signum, frame):
+        handle_parent_termination()
         release_pid_lock()
         sys.exit(0)
 

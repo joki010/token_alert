@@ -21,6 +21,7 @@ CONFIG_ENV = SCRIPT_DIR / "config" / "config.env"
 # 고정 설치 경로
 INSTALL_LIB_DIR = Path.home() / ".local" / "lib" / "token_alert"
 INSTALLED_CONFIG_ENV = Path.home() / ".config" / "token-alert" / "config.env"
+POLICY_FILE = Path.home() / ".config" / "token-alert" / "activation-policy.json"
 
 TRAY_PLIST_LABEL = "com.token-alert.tray"
 TRAY_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{TRAY_PLIST_LABEL}.plist"
@@ -161,6 +162,15 @@ def remove_installed_files() -> None:
             print("↩️  설치된 config.env 보존")
     else:
         print(f"ℹ️  설치된 config.env 없음: {INSTALLED_CONFIG_ENV}")
+
+    if POLICY_FILE.exists():
+        if confirm(f"자동 창 시작 정책 파일을 삭제할까요? ({POLICY_FILE})"):
+            POLICY_FILE.unlink()
+            print(f"✅ 정책 파일 삭제: {POLICY_FILE}")
+        else:
+            print("↩️  정책 파일 보존")
+    else:
+        print(f"ℹ️  정책 파일 없음: {POLICY_FILE}")
 
 
 def remind_config() -> None:

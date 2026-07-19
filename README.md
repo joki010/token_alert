@@ -54,6 +54,9 @@ cp config/config.env.example config/config.env
 | `CODEX_AUTH_JSON` | Codex `auth.json` 경로 (기본: `~/.codex/auth.json`) |
 | `CODEX_HOME` | `CODEX_AUTH_JSON` 대신 쓸 Codex 홈 경로 |
 | `CLAUDE_USAGE_CREDENTIALS` | Claude usage OAuth 자격 파일 경로 (기본: `~/.config/claude-usage-bar/credentials.json`) |
+| `CLAUDE_CLI_PATH` | Claude CLI의 절대 경로 |
+| `CLAUDE_ACTIVATION_PROMPT` | 자동 창 시작 시 전달할 프롬프트 (기본: `.`) |
+| `CLAUDE_ACTIVATION_TIMEOUT_SECONDS` | 자동 창 시작 각 시도별 타임아웃 (기본: 120) |
 
 직접 조회가 실패하거나 자격 파일이 없으면 기존 캐시와 JSONL 추정 방식으로 계속 동작합니다. Codex는 `CODEX_PROFILES_DIR` 아래의 각 프로필 `auth.json`을 계정별로 조회하고, 유효한 프로필이 없을 때만 단일 `CODEX_AUTH_JSON`/`CODEX_HOME`으로 폴백합니다. 접근 토큰과 새로고침 토큰은 로그, 상태 파일, 텔레그램 응답에 쓰지 않습니다.
 
@@ -81,7 +84,7 @@ python3 platform/macos/install.py
 설치 스크립트가 수행하는 작업:
 
 1. **고정 경로에 파일 복사** — 프로젝트 폴더 이동·삭제와 무관하게 데몬이 동작하도록 고정 위치에 설치
-   - `~/.local/lib/token_alert/src/watcher.py`
+   - `~/.local/lib/token_alert/src/watcher.py` (및 `atomic_json.py`, `activation.py`, `scheduling.py` 등 런타임 매니페스트)
    - `~/.config/token-alert/config.env` (권한 600)
 
 2. **watcher 데몬 등록** — `~/Library/LaunchAgents/com.token-alert.watcher.plist` 생성 및 로드  
@@ -120,9 +123,23 @@ python3 src/watcher.py --dry-run --once --verbose
 
 메뉴 막대 아이콘을 클릭하면:
 - **● 감시 중 / ○ 감시 중지됨** — watcher 현재 상태
+- **Claude 자동 창 시작** — 토큰 초기화 시 Claude Code를 자동 실행할지 토글 (기본값: 비활성화)
 - **감시 중지 / 감시 재시작** — watcher 토글
 - **로그 열기** — Console.app으로 로그 확인
 - **종료** — 트레이 앱 종료 (watcher는 계속 실행)
+
+---
+
+## Claude 자동 창 시작 (선택)
+
+macOS 트레이 메뉴에서 "Claude 자동 창 시작"을 켜면, watcher가 미리 저장한 Claude 5시간 초기화 시각이 지난 뒤 하나의 `claude -p` 자식 프로세스를 실행합니다.
+(GitHub 알림 조건인 300 < remaining <= 21600 제한은 워크플로우 전송에만 해당하며, 로컬 창 시작과는 무관합니다.)
+
+- **실행 조건**: 저장된 대기 건의 초기화 시점보다 `enabled_at`이 앞서야 합니다. 그 시점에 맥이 꺼져 있었다면 다음 watcher 실행에서 해당 대기 건을 한 번 처리합니다.
+- **프로세스 관리**: 데몬이 하나의 `claude -p` 자식 프로세스를 동기적으로 시작하고 종료나 타임아웃을 기다립니다. 백그라운드에 세션이 남지 않습니다.
+- **타임아웃과 재시도**: 최대 3회 시도하며, 각 시도당 120초 타임아웃을 갖습니다.
+- **안전 장치**: 드라이 런 모드에서는 Claude를 실행하거나 활성화 상태를 변경하지 않고 예정 동작만 로그로 보여 줍니다.
+- **설정**: 환경 변수나 `config.env`의 `CLAUDE_CLI_PATH`를 읽으며, 없을 시 자동 감지된 경로를 사용합니다.
 
 ---
 
@@ -164,7 +181,7 @@ python platform\windows\install.py
 
 설치 스크립트가 수행하는 작업:
 
-1. **고정 경로에 파일 복사** — `~\.local\lib\token_alert\src\watcher.py`, `~\.config\token-alert\config.env`
+1. **고정 경로에 파일 복사** — `~\.local\lib\token_alert\src\`에 `watcher.py`, `atomic_json.py`, `activation.py`, `scheduling.py`를 설치하고 `~\.config\token-alert\config.env`를 배치
 2. **TokenAlertTray.exe 빌드** — PyInstaller로 단일 실행 파일 생성 (`%LOCALAPPDATA%\TokenAlert\`)
 3. **시작 프로그램 등록 여부 선택** — `y` 선택 시 `HKCU\SOFTWARE\...\Run` 레지스트리에 등록 (관리자 권한 불필요)
 4. **즉시 시작** — watcher(`pythonw.exe`, 콘솔 창 없음) + 트레이 앱 백그라운드 실행
@@ -236,8 +253,7 @@ python3 -m unittest tests/test_watcher.py
 
 ### v1.1.0 (2026-06-23)
 
-- **맥+윈도우 동시 실행 시 중복 알림 방지**: GitHub Actions `concurrency` 그룹 설정 추가  
-  동일 그룹(`token-reset-notify`) 내 새 dispatch가 들어오면 기존 실행을 자동 취소하여, 어느 플랫폼에서 dispatch하든 항상 최신 run 하나만 유지됩니다.
+- **공급자별 예약 분리**: GitHub Actions `concurrency` 그룹을 알림 대상과 초기화 시각별로 분리하고, watcher가 같은 대상의 이전 대기 실행을 dispatch 전에 정리합니다.
 
 ### v1.0.0 (2026-06-22)
 

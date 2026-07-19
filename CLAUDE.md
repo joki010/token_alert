@@ -75,16 +75,23 @@ type %USERPROFILE%\.token_alert.pid
 - `/status` 텔레그램 명령도 동일 우선순위로 초기화 시각 조회 (dispatch 상태와 무관하게 실시간 정확한 값 표시)
 - 직전 예약 시각과 동일하면 중복 dispatch 방지 (`~/.token_alert_state.json`에 저장)
 - dispatch 직전 진행 중인 이전 워크플로우 실행을 모두 취소 (`cancel_previous_workflow_runs`) — 초기화 시각이 바뀔 때 중복 알림 방지
-- **맥/윈도우 동시 실행 중복 알림 방지**: GitHub Actions `concurrency: cancel-in-progress: true`가 담당 — 어느 머신이 dispatch해도 마지막 실행만 살아남음
+- GitHub Actions `concurrency`는 알림 대상과 초기화 시각별 그룹을 사용하며 `cancel-in-progress: false`; watcher가 같은 대상의 이전 대기 실행을 dispatch 전에 취소
 - GitHub API `POST /repos/{owner}/{repo}/actions/workflows/token-reset-notify.yml/dispatches` 로 `reset_time` 전달
 - `load_config()`는 `~/.config/token-alert/config.env` → 소스 경로 순으로 탐색 (고정 경로 우선)
 - 단일 인스턴스 보장: 시작 시 `~/.token_alert.pid` 파일 생성, 이미 실행 중이면 즉시 종료 (`acquire_pid_lock`)
 - 종료 시(`atexit`, `SIGTERM`, `SIGINT`) PID 파일 자동 삭제
 
+### Claude 자동 창 시작
+
+- macOS 트레이가 `~/.config/token-alert/activation-policy.json`을 쓰며, 누락되거나 잘못된 정책은 비활성으로 처리
+- watcher가 미래 Claude 5시간 초기화를 대기 상태로 저장하고, 초기화 시각보다 `enabled_at`이 앞선 대기 건만 처리; 컴퓨터가 꺼져 있었다면 다음 실행에서 한 번 처리
+- `claude -p` 자식 프로세스 하나를 동기적으로 실행하고 종료나 타임아웃까지 기다린 뒤 회수; 표준 입출력은 모두 비활성
+- `300 < remaining <= 21600` 조건은 GitHub Actions 알림 dispatch에만 적용되며 로컬 자동 창 시작에는 적용되지 않음
+
 ### GitHub Actions (`.github/workflows/token-reset-notify.yml`)
 
 - `workflow_dispatch` 트리거, input: `reset_time` (KST ISO 8601, 예: `2026-06-20T12:00:00+09:00`)
-- `run-name: ${{ inputs.reset_time }}` — 워크플로우 실행 이름에 초기화 시각 표시
+- `run-name: ${{ inputs.target_label }} ${{ inputs.reset_time }}` — 워크플로우 실행 이름에 대상과 초기화 시각 표시
 - `date` 명령으로 현재 시각과 목표 시각 차이 계산 → `sleep $DIFF`
 - 대기 후 `curl`로 Telegram Bot API 호출
 - 최대 실행 시간 360분(6시간) — 5시간 창보다 여유 있음
@@ -95,6 +102,7 @@ type %USERPROFILE%\.token_alert.pid
 
 - `rumps` 라이브러리 사용, venv에 설치됨
 - LaunchAgent: `com.token-alert.tray` (`~/Library/LaunchAgents/com.token-alert.tray.plist`)
+- `~/.config/token-alert/activation-policy.json` 정책 파일(atomic write)을 통해 "Claude 자동 창 시작" 옵션 토글 제어
 - GUI Python 필수: `/opt/homebrew/Cellar/python@3.13/.../Python.app/.../Python` (rumps가 NSApplication 필요)
 - `PYTHONPATH`를 venv site-packages로 지정해야 rumps import 가능
 - 독 아이콘 숨기기: `NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)` — `super().__init__` 전에 호출
@@ -135,7 +143,9 @@ type %USERPROFILE%\.token_alert.pid
 
 ### macOS 데몬 (`platform/macos/install.py`)
 
-- `install.py`가 `watcher.py`를 `~/.local/lib/token_alert/src/watcher.py`로, `config.env`를 `~/.config/token-alert/config.env`로 복사 (고정 경로 배포)
+- `install.py`가 `watcher.py`, `atomic_json.py`, `activation.py`, `scheduling.py` 매니페스트 파일들을 `~/.local/lib/token_alert/src/`로 설치하고, 기존 설치 설정과 정책 파일은 보존
+- 복사 시 `~/.config/token-alert/config.env`에 `CLAUDE_CLI_PATH` 자동 감지 및 추가 로직 수행
+- 설치 후 launchd reload 이전에 설치된 위치에서 `import watcher, atomic_json, activation, scheduling` 모듈 연동 검증(`verify_smoke`) 수행
 - `~/Library/LaunchAgents/com.token-alert.watcher.plist` 생성 후 `launchctl load` — plist는 소스 경로 대신 고정 경로를 참조
 - `ProcessType: Background` — 메뉴 바·독 아이콘 없음
 - `KeepAlive: true` — 크래시 시 자동 재시작
@@ -144,11 +154,12 @@ type %USERPROFILE%\.token_alert.pid
 
 ### Windows 데몬 (`platform/windows/install.py`)
 
-- `install.py`가 `watcher.py`를 `~/.local/lib/token_alert/src/watcher.py`로, `config.env`를 `~/.config/token-alert/config.env`로 복사 (고정 경로 배포)
+- `install.py`가 `watcher.py`, `atomic_json.py`, `activation.py`, `scheduling.py`를 `~/.local/lib/token_alert/src/`로 원자적으로 복사하고 `config.env`를 `~/.config/token-alert/config.env`로 배치
 - 시작 프로그램 등록: `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run` 레지스트리 (`winreg` 모듈) — Task Scheduler 불사용
   - `schtasks /create /ru`는 비밀번호 요구, `Register-ScheduledTask`는 샌드박스·비관리자 환경에서 액세스 거부 발생
 - watcher는 `pythonw.exe`(콘솔 창 없음)로 등록, tray는 `.exe` 직접 등록
 - 즉시 시작: `subprocess.Popen(..., creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS)`
+- 위 분리 실행 플래그는 Windows watcher와 트레이 시작에만 사용하며 Claude 자동 창 시작 자식에는 사용하지 않음
 - 로그: `%USERPROFILE%\.claude\token_alert.log`
 - **한글 Windows 인코딩**: `print()`에 이모지 포함 시 cp949 오류 → `PYTHONUTF8=1` 환경변수 또는 `-X utf8` 플래그 필요
 
@@ -170,7 +181,7 @@ type %USERPROFILE%\.token_alert.pid
 
 - `config/config.env`는 `.gitignore`에 등록됨 — 커밋하지 말 것
 - GitHub Secrets(`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`)는 Actions 워크플로우에서만 사용
-- `--dry-run` 플래그는 `~/.token_alert_state.json`에 상태를 **저장함** — dry-run 후 실제 dispatch가 필요하면 상태 파일 삭제 (`rm ~/.token_alert_state.json`)
+- `--dry-run`의 알림 예약 미리보기는 기존처럼 예약 상태를 저장할 수 있지만, Claude 자동 창 시작은 자식 프로세스를 실행하거나 활성화 상태를 변경하지 않음
 - `--dry-run` 모드에서는 `cancel_previous_workflow_runs` 호출 없음 — 실제 워크플로우가 취소되지 않음
 - `src/watcher.py`는 표준 라이브러리만 사용 — 추가 패키지 불필요
 - Windows tray.py는 `pystray`, `Pillow` 필요 (`pip install pystray Pillow`)
