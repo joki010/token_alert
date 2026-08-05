@@ -6,6 +6,7 @@ token_alert 설치 스크립트 (macOS)
 """
 
 import os
+import json
 import shutil
 import sys
 import subprocess
@@ -22,6 +23,9 @@ INSTALL_LIB_DIR = Path.home() / ".local" / "lib" / "token_alert" / "src"
 INSTALLED_WATCHER_PY = INSTALL_LIB_DIR / "watcher.py"
 INSTALLED_CONFIG_DIR = Path.home() / ".config" / "token-alert"
 INSTALLED_CONFIG_ENV = INSTALLED_CONFIG_DIR / "config.env"
+NOTIFY_SRC_DIR = SCRIPT_DIR / "platform" / "macos"
+NOTIFY_INSTALL_DIR = Path.home() / ".local" / "lib" / "token_alert" / "notify"
+CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_LABEL = "com.token-alert.watcher"
@@ -155,6 +159,105 @@ def _atomic_write_text(path: Path, content: str) -> None:
     except BaseException:
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def install_notify_scripts() -> None:
+    """클로드코드 알림 스크립트를 고정 위치에 원자적으로 설치합니다."""
+    script_names = ("notify.sh", "detect_terminal_app.sh")
+    sources = [NOTIFY_SRC_DIR / name for name in script_names]
+    missing = [source for source in sources if not source.is_file()]
+    if missing:
+        raise FileNotFoundError(f"알림 스크립트가 없습니다: {', '.join(str(path) for path in missing)}")
+
+    for source in sources:
+        destination = NOTIFY_INSTALL_DIR / source.name
+        _atomic_copy(source, destination)
+        destination.chmod(0o755)
+        print(f"✅ 알림 스크립트 설치: {destination}")
+
+
+def _notify_hook_specs() -> dict[str, dict[str, object]]:
+    notify_dir = str(NOTIFY_INSTALL_DIR)
+    return {
+        "SessionStart": {
+            "command": f"bash {notify_dir}/detect_terminal_app.sh",
+            "timeout": 5,
+        },
+        "PermissionRequest": {
+            "command": f"bash {notify_dir}/notify.sh '🔔 Claude Code' 'Input needed'",
+            "timeout": 10,
+        },
+        "Notification": {
+            "command": f"bash {notify_dir}/notify.sh '🔔 Claude Code' 'Attention needed'",
+            "timeout": 10,
+        },
+        "Stop": {
+            "command": f"bash {notify_dir}/notify.sh '✅ Claude Code' 'Task completed'",
+            "timeout": 10,
+        },
+    }
+
+
+def patch_claude_settings_hooks() -> None:
+    """Claude Code 전역 설정에 알림 훅을 멱등적으로 추가합니다."""
+    try:
+        if CLAUDE_SETTINGS_PATH.exists():
+            with CLAUDE_SETTINGS_PATH.open("r", encoding="utf-8") as handle:
+                settings = json.load(handle)
+            if not isinstance(settings, dict):
+                raise ValueError("최상위 값이 객체가 아닙니다")
+        else:
+            settings = {}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        print(f"⚠️  Claude Code 설정을 읽지 못했습니다. 건너뜁니다: {exc}")
+        return
+
+    hooks = settings.get("hooks")
+    if hooks is None:
+        hooks = {}
+        settings["hooks"] = hooks
+    elif not isinstance(hooks, dict):
+        print("⚠️  Claude Code 설정의 hooks 형식이 올바르지 않습니다. 건너뜁니다.")
+        return
+
+    for event, config in _notify_hook_specs().items():
+        event_hooks = hooks.get(event)
+        if event_hooks is None:
+            event_hooks = []
+            hooks[event] = event_hooks
+        elif not isinstance(event_hooks, list):
+            print(f"⚠️  Claude Code 설정의 {event} 훅 형식이 올바르지 않습니다. 건너뜁니다.")
+            return
+
+        existing_commands = {
+            hook.get("command", "")
+            for group in event_hooks
+            if isinstance(group, dict) and isinstance(group.get("hooks", []), list)
+            for hook in group.get("hooks", [])
+            if isinstance(hook, dict)
+        }
+        command = config["command"]
+        if command in existing_commands:
+            print(f"⏭️  {event}: 이미 존재 (건너뜀)")
+            continue
+
+        event_hooks.append({
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": command,
+                "timeout": config["timeout"],
+            }],
+        })
+        print(f"✅ {event}: 훅 추가됨")
+
+    try:
+        content = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+        _atomic_write_text(CLAUDE_SETTINGS_PATH, content)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"⚠️  Claude Code 설정을 저장하지 못했습니다. 계속 진행합니다: {exc}")
+        return
+    print(f"✅ Claude Code 설정 업데이트 완료: {CLAUDE_SETTINGS_PATH}")
 
 
 def _config_value(path: Path, key: str) -> str | None:
@@ -479,6 +582,10 @@ def main() -> None:
     banner("파일 설치 (고정 경로)")
     install_watcher_files()
     verify_smoke()
+
+    banner("클로드코드 알림 스크립트 설치")
+    install_notify_scripts()
+    patch_claude_settings_hooks()
 
     banner("시작 프로그램 등록")
     registered = ask_startup()

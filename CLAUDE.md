@@ -127,6 +127,13 @@ type %USERPROFILE%\.token_alert.pid
   `codesign --verify`는 Python.framework 번들 구조 특성상 여전히 경고 출력할 수 있음 — 로컬 실행에는 문제 없음
 - LaunchAgent plist에 `LimitLoadToSessionType = Aqua` 필요 — GUI/메뉴바 앱은 Aqua 세션에서만 동작
 
+### 클로드코드 알림 (Claude Code 로컬 알림)
+
+- `platform/macos/install.py`가 `notify.sh`, `detect_terminal_app.sh`를 `~/.local/lib/token_alert/notify/`에 고정 설치하고, `~/.claude/settings.json`에 `SessionStart`, `PermissionRequest`, `Notification`, `Stop` 훅을 멱등적으로 추가
+- 알림은 `terminal-notifier`와 경보음을 사용하며, `~/.config/token-alert/.notify_app`에 저장한 터미널 앱으로 클릭 시 이동
+- 트레이의 "클로드코드 알림" 메뉴가 `~/.config/token-alert/notify-policy.json`을 원자적으로 갱신한다. 형식은 `{"version":1,"enabled":bool,"enabled_at":"ISO8601 UTC ...Z"}`이며, 처음 토글하기 전에는 비활성
+- 설정 파일이 없거나 깨졌으면 설치·삭제를 막지 않고 건너뛰는 소프트 실패로 처리하며, 알림 정책이 정확히 `enabled: true`가 아닐 때 알림을 보내지 않음
+
 ### Windows 트레이 앱 (`platform/windows/tray.py`)
 
 - `pystray` + `Pillow` 사용

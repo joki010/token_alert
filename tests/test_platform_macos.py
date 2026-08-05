@@ -25,10 +25,14 @@ class TestTrayPolicy(TestCase):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.tmp_dir.name)
         self.policy_path = self.tmp_path / "activation-policy.json"
+        self.notify_policy_path = self.tmp_path / "notify-policy.json"
         self.patcher = mock.patch("tray.POLICY_FILE", self.policy_path)
+        self.notify_patcher = mock.patch("tray.NOTIFY_POLICY_FILE", self.notify_policy_path)
         self.patcher.start()
+        self.notify_patcher.start()
 
     def tearDown(self):
+        self.notify_patcher.stop()
         self.patcher.stop()
         self.tmp_dir.cleanup()
 
@@ -106,6 +110,24 @@ class TestTrayPolicy(TestCase):
         self.assertFalse(policy2["enabled"])
         self.assertNotEqual(policy2["enabled_at"], policy["enabled_at"])
 
+    def test_notify_policy_default_corrupt_and_persistence(self):
+        self.assertEqual(
+            tray.read_notify_policy(),
+            {"version": 1, "enabled": False},
+        )
+
+        self.notify_policy_path.write_text("invalid json", encoding="utf-8")
+        self.assertEqual(
+            tray.read_notify_policy(),
+            {"version": 1, "enabled": False},
+        )
+
+        self.assertTrue(tray.write_notify_policy(True))
+        policy = tray.read_notify_policy()
+        self.assertEqual(policy["version"], 1)
+        self.assertTrue(policy["enabled"])
+        self.assertIn("enabled_at", policy)
+
     @mock.patch("tray.is_watcher_running", return_value=True)
     @mock.patch("tray.is_login_item_enabled", return_value=False)
     @mock.patch("tray.NSApplication")
@@ -115,11 +137,17 @@ class TestTrayPolicy(TestCase):
             app = tray.TokenAlertApp()
             self.assertEqual(app.activation_item.title, "Claude 자동 창 시작")
             self.assertFalse(app.activation_item.state)
+            self.assertEqual(app.notify_item.title, "클로드코드 알림")
+            self.assertFalse(app.notify_item.state)
             
             # Simulate click
             app.toggle_activation(app.activation_item)
             self.assertTrue(app.activation_item.state)
             self.assertTrue(tray.read_policy()["enabled"])
+
+            app.toggle_notify(app.notify_item)
+            self.assertTrue(app.notify_item.state)
+            self.assertTrue(tray.read_notify_policy()["enabled"])
 
 class TestInstall(TestCase):
     def setUp(self):
@@ -140,12 +168,20 @@ class TestInstall(TestCase):
         self.config_env.parent.mkdir(parents=True)
         self.config_env.write_text("TELEGRAM_BOT_TOKEN=123", encoding="utf-8")
 
+        self.notify_src_dir = self.tmp_path / "notify_src"
+        self.notify_src_dir.mkdir(parents=True)
+        for f in ["notify.sh", "detect_terminal_app.sh"]:
+            (self.notify_src_dir / f).write_text(f"#!/bin/bash\n# {f}\n", encoding="utf-8")
+        self.notify_install_dir = self.tmp_path / "lib" / "token_alert" / "notify"
+
         self.patchers = [
             mock.patch("install.INSTALL_LIB_DIR", self.install_lib_dir),
             mock.patch("install.INSTALLED_CONFIG_DIR", self.installed_config_dir),
             mock.patch("install.INSTALLED_CONFIG_ENV", self.installed_config_env),
             mock.patch("install.SCRIPT_DIR", self.script_dir),
-            mock.patch("install.CONFIG_ENV", self.config_env)
+            mock.patch("install.CONFIG_ENV", self.config_env),
+            mock.patch("install.NOTIFY_SRC_DIR", self.notify_src_dir),
+            mock.patch("install.NOTIFY_INSTALL_DIR", self.notify_install_dir),
         ]
         for p in self.patchers:
             p.start()
@@ -227,6 +263,51 @@ class TestInstall(TestCase):
 
         self.assertFalse(self.install_lib_dir.exists())
 
+    def test_notify_scripts_are_installed_executable(self):
+        install.install_notify_scripts()
+
+        for name in ["notify.sh", "detect_terminal_app.sh"]:
+            path = self.notify_install_dir / name
+            self.assertTrue(path.exists())
+            self.assertTrue(os.access(path, os.X_OK))
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
+
+    def test_claude_hooks_are_idempotent_and_preserve_unrelated_hooks(self):
+        settings_path = self.tmp_path / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps({
+            "hooks": {
+                "PostToolUse": [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "bash unrelated-hook.sh",
+                    }],
+                }],
+            },
+        }), encoding="utf-8")
+
+        with mock.patch("install.CLAUDE_SETTINGS_PATH", settings_path):
+            install.patch_claude_settings_hooks()
+            install.patch_claude_settings_hooks()
+
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        commands = [
+            hook.get("command")
+            for groups in settings["hooks"].values()
+            for group in groups
+            for hook in group.get("hooks", [])
+        ]
+        expected = {
+            f"bash {self.notify_install_dir}/detect_terminal_app.sh",
+            f"bash {self.notify_install_dir}/notify.sh '🔔 Claude Code' 'Input needed'",
+            f"bash {self.notify_install_dir}/notify.sh '🔔 Claude Code' 'Attention needed'",
+            f"bash {self.notify_install_dir}/notify.sh '✅ Claude Code' 'Task completed'",
+        }
+        for command in expected:
+            self.assertEqual(commands.count(command), 1)
+        self.assertIn("bash unrelated-hook.sh", commands)
+
     @mock.patch("subprocess.run")
     def test_smoke_hook(self, mock_run):
         mock_run.return_value = mock.Mock(returncode=0)
@@ -268,3 +349,57 @@ class TestUninstall(TestCase):
             uninstall.remove_installed_files()
             
         self.assertFalse(policy_file.exists())
+
+    def test_remove_notify_hooks_only_removes_owned_commands(self):
+        settings_path = self.tmp_path / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        notify_install_dir = self.tmp_path / "lib" / "token_alert" / "notify"
+        target_commands = [
+            f"bash {notify_install_dir}/detect_terminal_app.sh",
+            f"bash {notify_install_dir}/notify.sh '🔔 Claude Code' 'Input needed'",
+            f"bash {notify_install_dir}/notify.sh '🔔 Claude Code' 'Attention needed'",
+            f"bash {notify_install_dir}/notify.sh '✅ Claude Code' 'Task completed'",
+        ]
+        settings_path.write_text(json.dumps({
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "",
+                    "hooks": [
+                        {"type": "command", "command": target_commands[0]},
+                        {"type": "command", "command": "bash unrelated-session-hook.sh"},
+                    ],
+                }],
+                "PermissionRequest": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": target_commands[1]}],
+                }],
+                "Notification": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": target_commands[2]}],
+                }],
+                "Stop": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": target_commands[3]}],
+                }],
+                "PostToolUse": [{
+                    "matcher": "",
+                    "hooks": [{"type": "command", "command": "bash unrelated-post-hook.sh"}],
+                }],
+            },
+        }), encoding="utf-8")
+
+        with mock.patch("uninstall.CLAUDE_SETTINGS_PATH", settings_path), \
+             mock.patch("uninstall.NOTIFY_INSTALL_DIR", notify_install_dir):
+            uninstall.remove_notify_hooks()
+
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        commands = [
+            hook.get("command")
+            for groups in settings["hooks"].values()
+            for group in groups
+            for hook in group.get("hooks", [])
+        ]
+        for command in target_commands:
+            self.assertNotIn(command, commands)
+        self.assertIn("bash unrelated-session-hook.sh", commands)
+        self.assertIn("bash unrelated-post-hook.sh", commands)
