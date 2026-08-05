@@ -300,8 +300,6 @@ class TestInstall(TestCase):
         ]
         expected = {
             f"bash {self.notify_install_dir}/detect_terminal_app.sh",
-            f"bash {self.notify_install_dir}/notify.sh '🔔 Claude Code' 'Input needed'",
-            f"bash {self.notify_install_dir}/notify.sh '🔔 Claude Code' 'Attention needed'",
             f"bash {self.notify_install_dir}/notify.sh '✅ Claude Code' 'Task completed'",
         }
         for command in expected:
@@ -356,8 +354,6 @@ class TestUninstall(TestCase):
         notify_install_dir = self.tmp_path / "lib" / "token_alert" / "notify"
         target_commands = [
             f"bash {notify_install_dir}/detect_terminal_app.sh",
-            f"bash {notify_install_dir}/notify.sh '🔔 Claude Code' 'Input needed'",
-            f"bash {notify_install_dir}/notify.sh '🔔 Claude Code' 'Attention needed'",
             f"bash {notify_install_dir}/notify.sh '✅ Claude Code' 'Task completed'",
         ]
         settings_path.write_text(json.dumps({
@@ -369,17 +365,9 @@ class TestUninstall(TestCase):
                         {"type": "command", "command": "bash unrelated-session-hook.sh"},
                     ],
                 }],
-                "PermissionRequest": [{
-                    "matcher": "",
-                    "hooks": [{"type": "command", "command": target_commands[1]}],
-                }],
-                "Notification": [{
-                    "matcher": "",
-                    "hooks": [{"type": "command", "command": target_commands[2]}],
-                }],
                 "Stop": [{
                     "matcher": "",
-                    "hooks": [{"type": "command", "command": target_commands[3]}],
+                    "hooks": [{"type": "command", "command": target_commands[1]}],
                 }],
                 "PostToolUse": [{
                     "matcher": "",

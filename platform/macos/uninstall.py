@@ -72,8 +72,6 @@ def _notify_hook_commands() -> set[str]:
     notify_dir = str(NOTIFY_INSTALL_DIR)
     return {
         f"bash {notify_dir}/detect_terminal_app.sh",
-        f"bash {notify_dir}/notify.sh '🔔 Claude Code' 'Input needed'",
-        f"bash {notify_dir}/notify.sh '🔔 Claude Code' 'Attention needed'",
         f"bash {notify_dir}/notify.sh '✅ Claude Code' 'Task completed'",
     }
 

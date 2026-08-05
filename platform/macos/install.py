@@ -183,14 +183,6 @@ def _notify_hook_specs() -> dict[str, dict[str, object]]:
             "command": f"bash {notify_dir}/detect_terminal_app.sh",
             "timeout": 5,
         },
-        "PermissionRequest": {
-            "command": f"bash {notify_dir}/notify.sh '🔔 Claude Code' 'Input needed'",
-            "timeout": 10,
-        },
-        "Notification": {
-            "command": f"bash {notify_dir}/notify.sh '🔔 Claude Code' 'Attention needed'",
-            "timeout": 10,
-        },
         "Stop": {
             "command": f"bash {notify_dir}/notify.sh '✅ Claude Code' 'Task completed'",
             "timeout": 10,
