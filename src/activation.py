@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,14 @@ TERMINATE_GRACE_SECONDS = 5
 MAX_TERMINAL_RECORDS = 32
 RESET_KEY_PREFIX = "claude:default:five_hour:"
 STATE_CORRUPTION_SENTINEL = "__token_alert_state_corrupt__"
+_UNKNOWN_OPTION_MARKERS = (
+    "unknown option",
+    "unrecognized option",
+    "unrecognized arguments",
+    "unknown argument",
+    "unknown flag",
+    "no such option",
+)
 
 
 def _utc_now() -> datetime:
@@ -37,6 +46,78 @@ def _parse_aware_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return None
     return parsed.astimezone(timezone.utc)
+
+
+def _parse_true_by_default(value: Any) -> bool:
+    if type(value) is bool:
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"0", "false", "no"}:
+        return False
+    return True
+
+
+def parse_activation_no_session_persistence(value: Any) -> bool:
+    """Parse the opt-out setting, defaulting to session persistence protection."""
+    return _parse_true_by_default(value)
+
+
+def parse_activation_session_cleanup(value: Any) -> bool:
+    """Parse the cleanup setting, defaulting to the safety cleanup."""
+    return _parse_true_by_default(value)
+
+
+def _is_unknown_option_error(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    lowered = text.lower()
+    return any(marker in lowered for marker in _UNKNOWN_OPTION_MARKERS)
+
+
+def resolve_activation_session_path(
+    projects_root: Path | str,
+    session_id: str | None,
+) -> Path | None:
+    """Resolve a session file only when its UUID stays under the projects root."""
+    if not isinstance(session_id, str):
+        return None
+    try:
+        parsed = uuid.UUID(session_id)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if str(parsed) != session_id.lower():
+        return None
+
+    try:
+        allowed_root = Path(projects_root).expanduser().resolve()
+        candidate = allowed_root / "-" / f"{session_id}.jsonl"
+        resolved_candidate = candidate.resolve()
+        resolved_candidate.relative_to(allowed_root)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    return candidate
+
+
+def cleanup_activation_session(
+    projects_root: Path | str,
+    session_id: str | None,
+    logger: Any,
+) -> str:
+    """Remove one validated session file and report a soft-fail outcome."""
+    path = resolve_activation_session_path(projects_root, session_id)
+    if path is None:
+        return "skipped"
+    try:
+        if not path.exists():
+            return "skipped"
+        path.unlink()
+    except (OSError, RuntimeError) as error:
+        logger.warning("Claude activation session cleanup failed: %s", error)
+        return "failed"
+    return "succeeded"
 
 
 def _iso_datetime(value: datetime) -> str:
@@ -221,8 +302,12 @@ def _terminal_record(
     started_at: str | None,
     finished_at: datetime,
     error_kind: str | None = None,
+    *,
+    session_id: str | None = None,
+    session_persistence: str | None = None,
+    session_cleanup: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "reset_key": reset_key,
         "status": status,
         "attempts": attempts,
@@ -230,6 +315,13 @@ def _terminal_record(
         "finished_at": _iso_datetime(finished_at),
         "error_kind": error_kind,
     }
+    if session_id is not None:
+        record["session_id"] = session_id
+    if session_persistence is not None:
+        record["session_persistence"] = session_persistence
+    if session_cleanup is not None:
+        record["session_cleanup"] = session_cleanup
+    return record
 
 
 def _commit_terminal(
@@ -272,6 +364,11 @@ class _ActiveExecution:
     child: Any = None
     terminated: bool = False
     unknown_committed: bool = False
+    session_id: str | None = None
+    session_persistence: str | None = None
+    session_cleanup: str | None = None
+    projects_root: Path | str | None = None
+    session_cleanup_enabled: bool = True
 
     def commit_unknown(self, error_kind: str) -> None:
         if self.unknown_committed:
@@ -283,6 +380,7 @@ class _ActiveExecution:
         reset_epoch = _reset_epoch_from_key(reset_key)
         if reset_epoch is None:
             return
+        _cleanup_active_session(self)
         record = _terminal_record(
             reset_key,
             "unknown",
@@ -290,10 +388,29 @@ class _ActiveExecution:
             pending.get("started_at"),
             _utc_now(),
             error_kind,
+            session_id=self.session_id,
+            session_persistence=self.session_persistence,
+            session_cleanup=self.session_cleanup,
         )
         _commit_terminal(self.namespace, record, reset_epoch)
         _save_namespace(self.state, self.namespace, self.save_state)
         self.unknown_committed = True
+
+
+def _cleanup_active_session(active: _ActiveExecution) -> None:
+    if active.session_cleanup is not None or active.session_persistence is None:
+        return
+    if active.session_persistence == "disabled":
+        active.session_cleanup = "not_needed"
+        return
+    if not active.session_cleanup_enabled or active.session_id is None or active.projects_root is None:
+        active.session_cleanup = "skipped"
+        return
+    active.session_cleanup = cleanup_activation_session(
+        active.projects_root,
+        active.session_id,
+        active.logger,
+    )
 
 
 _ACTIVE_EXECUTION: _ActiveExecution | None = None
@@ -346,6 +463,7 @@ def _finish(
     reset_epoch = _reset_epoch_from_key(reset_key)
     if reset_epoch is None:
         return
+    _cleanup_active_session(active)
     record = _terminal_record(
         reset_key,
         status,
@@ -353,9 +471,28 @@ def _finish(
         pending.get("started_at"),
         now,
         error_kind,
+        session_id=active.session_id,
+        session_persistence=active.session_persistence,
+        session_cleanup=active.session_cleanup,
     )
     _commit_terminal(active.namespace, record, reset_epoch)
     _save_namespace(active.state, active.namespace, active.save_state)
+
+
+def build_activation_command(
+    cli_path: Path,
+    prompt: str,
+    *,
+    no_session_persistence: bool = True,
+    session_id: str | None = None,
+) -> list[str]:
+    """Build the command used to start Claude for a reset activation."""
+    command = [str(cli_path), "-p", prompt]
+    if no_session_persistence:
+        command.append("--no-session-persistence")
+    if session_id is not None:
+        command.extend(["--session-id", session_id])
+    return command
 
 
 def _spawn_and_wait(
@@ -364,37 +501,77 @@ def _spawn_and_wait(
     prompt: str,
     timeout_seconds: float,
     popen_factory: Callable[..., Any],
+    *,
+    no_session_persistence: bool = True,
+    session_cleanup_enabled: bool = True,
+    projects_root: Path | str | None = None,
 ) -> tuple[str, str | None]:
-    try:
-        child = popen_factory(
-            [str(cli_path), "-p", prompt],
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "retry", "spawn_error"
+    active.session_id = None
+    active.session_cleanup = None
+    active.projects_root = projects_root
+    active.session_cleanup_enabled = session_cleanup_enabled
+    active.session_persistence = "disabled" if no_session_persistence else "enabled"
+    if not no_session_persistence and session_cleanup_enabled:
+        active.session_id = str(uuid.uuid4())
 
-    active.child = child
-    if active.terminated:
-        _terminate_child(child, active.logger)
-        return "unknown", "parent_termination"
-    try:
-        child.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        _terminate_child(child, active.logger)
-        return "retry", "timeout"
-    except (OSError, ProcessLookupError):
-        return "retry", "wait_error"
-    finally:
-        active.child = None
+    def run_once(
+        use_no_session_persistence: bool,
+        use_session_id: str | None,
+    ) -> tuple[str, str | None]:
+        try:
+            child = popen_factory(
+                build_activation_command(
+                    cli_path,
+                    prompt,
+                    no_session_persistence=use_no_session_persistence,
+                    session_id=use_session_id,
+                ),
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE if use_no_session_persistence else subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            if use_no_session_persistence and _is_unknown_option_error(error):
+                return "unsupported_option", "unknown_option"
+            return "retry", "spawn_error"
 
-    if active.terminated:
-        return "unknown", "parent_termination"
-    if child.returncode == 0:
-        return "success", None
-    return "retry", "nonzero_exit"
+        active.child = child
+        if active.terminated:
+            _terminate_child(child, active.logger)
+            return "unknown", "parent_termination"
+        stderr_output = None
+        try:
+            result = child.communicate(timeout=timeout_seconds)
+            if isinstance(result, tuple) and len(result) >= 2:
+                stderr_output = result[1]
+        except subprocess.TimeoutExpired:
+            _terminate_child(child, active.logger)
+            return "retry", "timeout"
+        except (OSError, ProcessLookupError):
+            return "retry", "wait_error"
+        finally:
+            active.child = None
+
+        if active.terminated:
+            return "unknown", "parent_termination"
+        if child.returncode == 0:
+            return "success", None
+        if use_no_session_persistence and _is_unknown_option_error(stderr_output):
+            return "unsupported_option", "unknown_option"
+        return "retry", "nonzero_exit"
+
+    outcome, error_kind = run_once(no_session_persistence, active.session_id)
+    if outcome != "unsupported_option" or not no_session_persistence:
+        return outcome, error_kind
+
+    active.session_persistence = "fallback_enabled"
+    if session_cleanup_enabled:
+        active.session_id = str(uuid.uuid4())
+    active.logger.warning(
+        "Claude CLI does not support --no-session-persistence; retrying without it"
+    )
+    return run_once(False, active.session_id)
 
 
 def _execute_pending(
@@ -422,6 +599,13 @@ def _execute_pending(
     prompt = cfg.get("CLAUDE_ACTIVATION_PROMPT", DEFAULT_PROMPT)
     if not isinstance(prompt, str):
         prompt = DEFAULT_PROMPT
+    no_session_persistence = parse_activation_no_session_persistence(
+        cfg.get("CLAUDE_ACTIVATION_NO_SESSION_PERSISTENCE")
+    )
+    session_cleanup_enabled = parse_activation_session_cleanup(
+        cfg.get("CLAUDE_ACTIVATION_SESSION_CLEANUP")
+    )
+    projects_root = cfg.get("CLAUDE_PROJECTS_DIR", "~/.claude/projects")
     try:
         timeout_seconds = float(cfg.get("CLAUDE_ACTIVATION_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
         if timeout_seconds <= 0:
@@ -451,7 +635,11 @@ def _execute_pending(
                 prompt,
                 timeout_seconds,
                 popen_factory,
+                no_session_persistence=no_session_persistence,
+                session_cleanup_enabled=session_cleanup_enabled,
+                projects_root=projects_root,
             )
+            _cleanup_active_session(active)
             if outcome == "unknown":
                 active.commit_unknown(error_kind or "parent_termination")
                 return

@@ -160,6 +160,8 @@ def load_config() -> dict:
         "CLAUDE_CLI_PATH",
         "CLAUDE_ACTIVATION_PROMPT",
         "CLAUDE_ACTIVATION_TIMEOUT_SECONDS",
+        "CLAUDE_ACTIVATION_NO_SESSION_PERSISTENCE",
+        "CLAUDE_ACTIVATION_SESSION_CLEANUP",
     ]:
         env_val = os.environ.get(key)
         if env_val:

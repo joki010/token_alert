@@ -85,7 +85,10 @@ type %USERPROFILE%\.token_alert.pid
 
 - macOS 트레이가 `~/.config/token-alert/activation-policy.json`을 쓰며, 누락되거나 잘못된 정책은 비활성으로 처리
 - watcher가 미래 Claude 5시간 초기화를 대기 상태로 저장하고, 초기화 시각보다 `enabled_at`이 앞선 대기 건만 처리; 컴퓨터가 꺼져 있었다면 다음 실행에서 한 번 처리
-- `claude -p` 자식 프로세스 하나를 동기적으로 실행하고 종료나 타임아웃까지 기다린 뒤 회수; 표준 입출력은 모두 비활성
+- `claude -p` 자식 프로세스 하나를 동기적으로 실행하고 종료나 타임아웃까지 기다린 뒤 회수; 자식 프로세스는 종료 뒤 남지 않으며 표준 입출력은 모두 비활성
+- 자동 실행은 기본으로 `--no-session-persistence`를 사용해 세션 파일 저장을 막음 (`CLAUDE_ACTIVATION_NO_SESSION_PERSISTENCE`, 기본값 `1`)
+- 구버전 CLI가 해당 옵션을 모르면 같은 시도에서 플래그 없이 한 번 재시도; fallback 세션은 `CLAUDE_ACTIVATION_SESSION_CLEANUP`(기본값 `1`)이 켜진 경우 session-id 기반으로 허용된 루트 아래에서만 안전망 정리하며, 실패해도 자동 실행을 막지 않는 soft-fail로 처리
+- 기존 잔여 세션은 `python3 scripts/cleanup_activation_sessions.py`로 1회 점검하며 dry-run이 기본이고 실제 삭제는 `--apply`에서만 수행
 - `300 < remaining <= 21600` 조건은 GitHub Actions 알림 dispatch에만 적용되며 로컬 자동 창 시작에는 적용되지 않음
 
 ### GitHub Actions (`.github/workflows/token-reset-notify.yml`)

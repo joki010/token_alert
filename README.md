@@ -57,6 +57,8 @@ cp config/config.env.example config/config.env
 | `CLAUDE_CLI_PATH` | Claude CLI의 절대 경로 |
 | `CLAUDE_ACTIVATION_PROMPT` | 자동 창 시작 시 전달할 프롬프트 (기본: `.`) |
 | `CLAUDE_ACTIVATION_TIMEOUT_SECONDS` | 자동 창 시작 각 시도별 타임아웃 (기본: 120) |
+| `CLAUDE_ACTIVATION_NO_SESSION_PERSISTENCE` | 자동 실행에서 세션 파일 저장을 막을지 여부 (기본: `1`) |
+| `CLAUDE_ACTIVATION_SESSION_CLEANUP` | fallback 세션 파일 안전망 정리 여부 (기본: `1`) |
 
 직접 조회가 실패하거나 자격 파일이 없으면 기존 캐시와 JSONL 추정 방식으로 계속 동작합니다. Codex는 `CODEX_PROFILES_DIR` 아래의 각 프로필 `auth.json`을 계정별로 조회하고, 유효한 프로필이 없을 때만 단일 `CODEX_AUTH_JSON`/`CODEX_HOME`으로 폴백합니다. 접근 토큰과 새로고침 토큰은 로그, 상태 파일, 텔레그램 응답에 쓰지 않습니다.
 
@@ -136,10 +138,12 @@ macOS 트레이 메뉴에서 "Claude 자동 창 시작"을 켜면, watcher가 �
 (GitHub 알림 조건인 300 < remaining <= 21600 제한은 워크플로우 전송에만 해당하며, 로컬 창 시작과는 무관합니다.)
 
 - **실행 조건**: 저장된 대기 건의 초기화 시점보다 `enabled_at`이 앞서야 합니다. 그 시점에 맥이 꺼져 있었다면 다음 watcher 실행에서 해당 대기 건을 한 번 처리합니다.
-- **프로세스 관리**: 데몬이 하나의 `claude -p` 자식 프로세스를 동기적으로 시작하고 종료나 타임아웃을 기다립니다. 백그라운드에 세션이 남지 않습니다.
+- **프로세스 관리**: 데몬이 하나의 `claude -p` 자식 프로세스를 동기적으로 시작하고 종료나 타임아웃을 기다린 뒤 회수합니다. 자식 프로세스는 종료 뒤 백그라운드에 남지 않습니다.
+- **세션 파일 관리**: 기본으로 `--no-session-persistence`를 붙여 디스크에 세션 파일을 저장하지 않습니다. 구버전 CLI가 이 옵션을 모르면 같은 시도에서 플래그 없이 한 번 재시도합니다. 이 fallback에서 세션 파일이 저장될 수 있으며, `CLAUDE_ACTIVATION_SESSION_CLEANUP`이 켜져 있으면 session-id 기반 안전망으로 허용된 루트 아래의 해당 파일만 정리합니다. 정리 실패는 soft-fail로 처리됩니다.
 - **타임아웃과 재시도**: 최대 3회 시도하며, 각 시도당 120초 타임아웃을 갖습니다.
+- **기존 잔여 세션 정리**: `python3 scripts/cleanup_activation_sessions.py`는 dry-run이 기본이며, 후보를 실제로 지우려면 `--apply`를 붙입니다. 이 도구는 1회 정리용이며 상시 청소 데몬이 아닙니다.
 - **안전 장치**: 드라이 런 모드에서는 Claude를 실행하거나 활성화 상태를 변경하지 않고 예정 동작만 로그로 보여 줍니다.
-- **설정**: 환경 변수나 `config.env`의 `CLAUDE_CLI_PATH`를 읽으며, 없을 시 자동 감지된 경로를 사용합니다.
+- **설정**: 환경 변수나 `config.env`의 `CLAUDE_CLI_PATH`를 읽으며, 없을 시 자동 감지된 경로를 사용합니다. `CLAUDE_ACTIVATION_NO_SESSION_PERSISTENCE`와 `CLAUDE_ACTIVATION_SESSION_CLEANUP`은 기본값이 `1`이고 `0`/`false`/`no`로 끌 수 있습니다.
 
 ---
 
