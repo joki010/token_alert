@@ -675,6 +675,103 @@ class TestDirectUsageFetch(unittest.TestCase):
         self.assertEqual(status.source, "cache")
         self.assertAlmostEqual(status.five_hour_reset.timestamp(), future.timestamp(), delta=1)
 
+    def _url_router(self, mapping: dict):
+        def _open(req, *args, **kwargs):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            for prefix, result in mapping.items():
+                if url.startswith(prefix):
+                    if isinstance(result, Exception):
+                        raise result
+                    return result
+            raise urllib.error.URLError(f"unexpected url: {url}")
+        return _open
+
+    def test_claude_failure_falls_back_to_cache_even_when_codex_succeeds(self):
+        watcher._WARNED_STATES.clear()
+        now = datetime.now(timezone.utc)
+        five = now + timedelta(hours=3)
+        seven = now + timedelta(days=2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            auth_path = Path(tmp) / "auth.json"
+            claude_path = Path(tmp) / "claude.json"
+            usage_path = Path(tmp) / "usage.json"
+            auth_path.write_text(json.dumps({
+                "tokens": {"access_token": "secret-access-token", "account_id": "acct_123"}
+            }), encoding="utf-8")
+            claude_path.write_text(json.dumps({
+                "accessToken": "expired-token",
+                "refreshToken": "refresh-token",
+                "expiresAt": (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "scopes": ["user:profile", "user:inference"],
+            }), encoding="utf-8")
+            usage_path.write_text(json.dumps({
+                "updated_at": now.isoformat(),
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 12, "resets_at": five.timestamp()},
+                    "seven_day": {"used_percentage": 74, "resets_at": seven.timestamp()},
+                },
+                "five_hour_resets_at": five.timestamp(),
+                "seven_day_resets_at": seven.timestamp(),
+            }), encoding="utf-8")
+
+            codex_resp = self._make_response({
+                "email": "me@example.com",
+                "plan_type": "plus",
+                "rate_limit": {"secondary_window": {"used_percent": 3, "reset_after_seconds": 86400}},
+            })
+            router = self._url_router({
+                watcher.CODEX_USAGE_URL: codex_resp,
+                watcher.CLAUDE_USAGE_URL: urllib.error.HTTPError(
+                    watcher.CLAUDE_USAGE_URL, 401, "Unauthorized", {}, None
+                ),
+            })
+
+            with patch.object(watcher, "USAGE_FILE", usage_path), \
+                 patch("urllib.request.urlopen", side_effect=router):
+                status = watcher.get_current_limit_status({
+                    "CODEX_AUTH_JSON": str(auth_path),
+                    "CLAUDE_USAGE_CREDENTIALS": str(claude_path),
+                })
+
+        providers = {window.provider for window in status.provider_windows}
+        self.assertEqual(status.source, "direct+cache")
+        self.assertIn("codex", providers)
+        self.assertIn("claude", providers, "Codex가 성공해도 Claude는 캐시로 폴백해야 한다")
+        claude_windows = {w.window: w for w in status.provider_windows if w.provider == "claude"}
+        self.assertAlmostEqual(claude_windows["five_hour"].reset.timestamp(), five.timestamp(), delta=1)
+        self.assertEqual(claude_windows["seven_day"].used_percentage, 74)
+        watcher._WARNED_STATES.clear()
+
+    def test_claude_usage_failure_warns_once_and_resets_after_success(self):
+        watcher._WARNED_STATES.clear()
+        logger = self._make_logger()
+        credentials = watcher.ClaudeCredentials("expired-token", None, None, ("user:profile",))
+        failure = urllib.error.HTTPError(watcher.CLAUDE_USAGE_URL, 401, "Unauthorized", {}, None)
+
+        with patch("urllib.request.urlopen", side_effect=failure):
+            with self.assertLogs(logger, level="WARNING") as captured:
+                watcher.fetch_claude_usage_status(credentials, logger)
+            self.assertTrue(any("401" in line for line in captured.output))
+
+            # 같은 장애가 이어지는 동안에는 폴링마다 반복 기록하지 않는다.
+            with self.assertRaises(AssertionError):
+                with self.assertLogs(logger, level="WARNING"):
+                    watcher.fetch_claude_usage_status(credentials, logger)
+
+        success = self._make_response({
+            "five_hour": {"utilization": 5, "resets_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()},
+        })
+        with patch("urllib.request.urlopen", return_value=success):
+            watcher.fetch_claude_usage_status(credentials, logger)
+        self.assertNotIn("claude_usage", watcher._WARNED_STATES, "회복되면 경고 상태가 해제돼야 한다")
+
+        # 회복 뒤 다시 실패하면 새로 기록된다.
+        with patch("urllib.request.urlopen", side_effect=failure):
+            with self.assertLogs(logger, level="WARNING"):
+                watcher.fetch_claude_usage_status(credentials, logger)
+        watcher._WARNED_STATES.clear()
+
     def test_status_distinguishes_provider_windows(self):
         now = datetime.now(timezone.utc)
         status = watcher.LimitStatus(

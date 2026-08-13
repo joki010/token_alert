@@ -51,6 +51,10 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_USER_AGENT = "ClaudeUsageBar/0.6"
 DEFAULT_CLAUDE_SCOPES = ("user:profile", "user:inference")
+CLAUDE_USAGE_CREDENTIALS_HINT = (
+    "CLAUDE_USAGE_CREDENTIALS 파일을 재발급하세요 "
+    "(macOS: security find-generic-password -s 'Claude Code-credentials' -w 의 claudeAiOauth 값)."
+)
 OPENAI_AUTH_CLAIM = "https://api.openai.com/auth"
 
 
@@ -258,6 +262,26 @@ def _read_json_file(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+_WARNED_STATES: set[str] = set()
+
+
+def _warn_once(logger: logging.Logger, key: str, message: str) -> None:
+    """같은 장애 상태를 폴링마다 반복 기록하지 않도록 상태별 1회만 경고한다.
+
+    자격증명 만료처럼 사람이 개입해야 풀리는 실패는 조용히 넘어가면 며칠씩
+    묻힌다. 그렇다고 매 폴링(기본 600초)마다 찍으면 로그가 잠기므로,
+    상태가 회복될 때까지 첫 1회만 남기고 회복 시 _clear_warning으로 해제한다.
+    """
+    if key in _WARNED_STATES:
+        return
+    _WARNED_STATES.add(key)
+    logger.warning(message)
+
+
+def _clear_warning(key: str) -> None:
+    _WARNED_STATES.discard(key)
+
+
 def _json_request(
     url: str,
     headers: dict[str, str],
@@ -448,7 +472,14 @@ def fetch_codex_usage_status(
         timeout=12,
     )
     if data is None:
+        _warn_once(
+            logger,
+            f"codex_usage:{profile or auth.account_id}",
+            f"Codex 사용량 API 조회 실패 (프로필: {profile or auth.account_id}) — "
+            "자격증명 만료(401)일 가능성이 높습니다. codex 로그인을 갱신하세요.",
+        )
         return LimitStatus()
+    _clear_warning(f"codex_usage:{profile or auth.account_id}")
     rate = _dict_value(data, "rate_limit") or _dict_value(data, "rateLimit")
     primary = _dict_value(rate, "primary_window") or _dict_value(rate, "primaryWindow")
     secondary = _dict_value(rate, "secondary_window") or _dict_value(rate, "secondaryWindow")
@@ -518,8 +549,14 @@ def _refresh_claude_credentials(
     if credentials is None:
         return None
     if credentials.expires_at_epoch is None or credentials.expires_at_epoch > int(now.timestamp()) + 120:
+        _clear_warning("claude_refresh")
         return credentials
     if not credentials.refresh_token:
+        _warn_once(
+            logger,
+            "claude_refresh",
+            f"Claude 사용량 자격이 만료됐고 refresh token이 없습니다 ({path}). 재발급이 필요합니다.",
+        )
         return None
     body = json.dumps({
         "grant_type": "refresh_token",
@@ -535,10 +572,21 @@ def _refresh_claude_credentials(
         body=body,
     )
     if data is None:
+        _warn_once(
+            logger,
+            "claude_refresh",
+            f"Claude 사용량 자격 갱신 실패 — refresh token이 무효일 수 있습니다 ({path}). 재발급이 필요합니다.",
+        )
         return None
     access_token = _str_value(data, "access_token")
     if not access_token:
+        _warn_once(
+            logger,
+            "claude_refresh",
+            f"Claude 사용량 자격 갱신 응답에 access_token이 없습니다 ({path}). 재발급이 필요합니다.",
+        )
         return None
+    _clear_warning("claude_refresh")
     expires_in = _num_value(data, "expires_in")
     refreshed = ClaudeCredentials(
         access_token=access_token,
@@ -583,6 +631,12 @@ def fetch_claude_usage_status(credentials: ClaudeCredentials | None, logger: log
         logger,
     )
     if data is None:
+        _warn_once(
+            logger,
+            "claude_usage",
+            "Claude 사용량 API 조회 실패 — 자격증명 만료(401)일 가능성이 높습니다. "
+            f"{CLAUDE_USAGE_CREDENTIALS_HINT}",
+        )
         return LimitStatus()
     windows = tuple(
         window for window in (
@@ -592,7 +646,15 @@ def fetch_claude_usage_status(credentials: ClaudeCredentials | None, logger: log
         if window is not None
     )
     status = _status_from_windows(windows, "claude")
-    return status if status.five_hour_reset is not None or status.seven_day_reset is not None else LimitStatus()
+    if status.five_hour_reset is None and status.seven_day_reset is None:
+        _warn_once(
+            logger,
+            "claude_usage",
+            "Claude 사용량 API 응답에 유효한 한도 창이 없습니다. 응답 형식이 바뀌었을 수 있습니다.",
+        )
+        return LimitStatus()
+    _clear_warning("claude_usage")
+    return status
 
 
 def fetch_direct_usage_status(cfg: dict, logger: logging.Logger | None = None) -> LimitStatus:
@@ -663,9 +725,39 @@ def read_reset_time_from_usage_file() -> datetime | None:
     return read_limit_status_from_usage_file().five_hour_reset
 
 
+def _claude_windows_from_cache(status: LimitStatus) -> tuple[ProviderWindow, ...]:
+    """usage.json 캐시의 Claude 한도를 ProviderWindow 형태로 변환한다."""
+    windows = []
+    for window, reset, used in (
+        ("five_hour", status.five_hour_reset, status.five_hour_used_percentage),
+        ("seven_day", status.seven_day_reset, status.seven_day_used_percentage),
+    ):
+        if reset is None:
+            continue
+        windows.append(ProviderWindow(
+            provider="claude",
+            label="Claude",
+            window=window,
+            reset=reset,
+            remaining_percentage=round(100 - used) if used is not None else None,
+            used_percentage=used,
+        ))
+    return tuple(windows)
+
+
 def get_current_limit_status(cfg: dict) -> LimitStatus:
     direct_status = fetch_direct_usage_status(cfg)
     if direct_status.five_hour_reset is not None or direct_status.seven_day_reset is not None:
+        # 폴백은 공급자별로 판정한다. Codex가 살아 있다는 이유로 direct 전체를
+        # 성공 처리하면, Claude 자격이 만료됐을 때 usage.json에 멀쩡한 값이
+        # 있어도 캐시 폴백에 도달하지 못해 Claude 알림이 통째로 사라진다.
+        if not any(window.provider == "claude" for window in direct_status.provider_windows):
+            claude_windows = _claude_windows_from_cache(read_limit_status_from_usage_file())
+            if claude_windows:
+                return _status_from_windows(
+                    direct_status.provider_windows + claude_windows,
+                    "direct+cache",
+                )
         return direct_status
 
     cache_status = read_limit_status_from_usage_file()
